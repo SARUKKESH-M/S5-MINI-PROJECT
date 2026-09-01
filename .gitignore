@@ -1,0 +1,96 @@
+# CodeSentinel - Comprehensive Git Ignore Rules
+
+# ==============================================================================
+# Environment & Secret Files (CRITICAL BASELINE SECURITY)
+# ==============================================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.crt
+*.csr
+*.pfx
+secrets/
+.secrets/
+credentials.json
+service_account.json
+
+# ==============================================================================
+# Python Baseline & Virtual Environments
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.eggs/
+dist/
+build/
+eggs/
+parts/
+sdist/
+wheels/
+*.egg
+
+# Testing & Coverage Cache
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ==============================================================================
+# JavaScript / React / Node Dependencies & Builds
+# ==============================================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.next/
+.vite/
+
+# ==============================================================================
+# Database / Local Storage / Vector DB (ChromaDB)
+# ==============================================================================
+*.sqlite
+*.sqlite3
+*.db
+*.sdb
+*.dump
+*.sql
+chroma_db/
+chroma_data/
+vector_db/
+data/
+storage/
+
+# ==============================================================================
+# Application Logs & Temporary Files
+# ==============================================================================
+logs/
+*.log
+tmp/
+temp/
+.cache/
+
+# ==============================================================================
+# IDE / OS Specific Files
+# ==============================================================================
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/code-snippets
+.idea/
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
