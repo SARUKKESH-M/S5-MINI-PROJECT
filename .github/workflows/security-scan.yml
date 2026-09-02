@@ -1,0 +1,62 @@
+name: CodeSentinel Security Scan
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+  statuses: write
+
+jobs:
+  security-scan:
+    name: CodeSentinel Automated Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: "backend/requirements.txt"
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pytest httpx
+
+      - name: Run CodeSentinel Static Security Scan
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m backend.analysis.security_scan --target-dir . --output security-report.json
+
+      - name: Generate GitHub Actions Security Summary
+        env:
+          PYTHONPATH: .
+        if: always()
+        run: |
+          python -m backend.analysis.ci_report --report security-report.json --append-step-summary
+
+      - name: Evaluate CodeSentinel Security Gate
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m backend.analysis.security_gate --report security-report.json
+
+      - name: Upload Security Report Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: codesentinel-security-report
+          path: security-report.json
+          retention-days: 14

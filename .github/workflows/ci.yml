@@ -1,0 +1,56 @@
+name: CodeSentinel CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend-tests:
+    name: Backend Regression Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: "backend/requirements.txt"
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pytest httpx
+
+      - name: Run backend pytest suite
+        env:
+          PYTHONPATH: .
+        run: |
+          pytest
+
+  frontend-build:
+    name: Frontend Production Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: "frontend/package-lock.json"
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build

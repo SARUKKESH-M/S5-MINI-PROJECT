@@ -1,5 +1,5 @@
 """
-CodeSentinel — Step 6Q-C: GitHub Integration Package
+CodeSentinel — Step 6Q-D: GitHub Integration Package
 """
 
 from backend.github.client import GitHubClient
@@ -39,6 +39,12 @@ from backend.github.publisher import (
     create_commit_status,
     publish_step_6o_report_status
 )
+from backend.github.commenter import (
+    COMMENT_MARKER,
+    format_pr_security_comment,
+    post_pr_security_comment
+)
+from backend.github.orchestrator import orchestrate_webhook_event
 
 __all__ = [
     "GitHubClient",
@@ -67,5 +73,9 @@ __all__ = [
     "create_check_run",
     "update_check_run",
     "create_commit_status",
-    "publish_step_6o_report_status"
+    "publish_step_6o_report_status",
+    "COMMENT_MARKER",
+    "format_pr_security_comment",
+    "post_pr_security_comment",
+    "orchestrate_webhook_event"
 ]
