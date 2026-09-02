@@ -25,6 +25,8 @@ DEFAULT_EXCLUDED_DIRECTORIES: Set[str] = {
     "coverage",
     ".idea",
     ".vscode",
+    "tests",
+    "test",
 }
 
 DEFAULT_EXCLUDED_PATTERNS: List[str] = [
@@ -96,8 +98,10 @@ def should_exclude_path(
     if not isinstance(rel_path, str) or not rel_path.strip():
         return False
 
-    clean_path = rel_path.strip().replace("\\", "/").strip("/")
-    parts = [p.lower() for p in clean_path.split("/") if p]
+    clean_path = rel_path.strip().replace("\\", "/")
+    # Normalize relative path to resolve '.' and '..' traversal segments
+    norm_path = os.path.normpath(clean_path).replace("\\", "/").strip("/")
+    parts = [p.lower() for p in norm_path.split("/") if p and p != ".."]
 
     # Check directory components against default excluded directories
     for part in parts:

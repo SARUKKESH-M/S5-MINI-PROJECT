@@ -202,7 +202,17 @@ def analyze_repository(
                 # Malformed Python source must not crash the entire repository analysis
                 pass
 
-    # 5. Ingest AST documents into RAG vector store
+    # 5. Clear stale AST evidence & Ingest fresh repository AST documents into RAG vector store
+    try:
+        from rag.vector_store import initialize_vector_store
+        v_client = initialize_vector_store()
+        try:
+            v_client.delete_collection(DEFAULT_COLLECTION_NAME)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     if all_ast_docs:
         try:
             ingest_documents(all_ast_docs, collection_name=DEFAULT_COLLECTION_NAME)

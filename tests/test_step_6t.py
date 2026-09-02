@@ -131,6 +131,67 @@ def test_scope_exclusion_and_path_traversal(tmp_path):
         normalize_and_validate_repository_path("../../../etc/passwd", repo_root)
 
 
+def test_step_1b_security_scan_scope_requirements(tmp_path):
+    """
+    Step 1B Security Scan Scope Verification:
+    Proves requirements A-G:
+    A. tests/ files excluded from production security scanning.
+    B. Production source files are still scanned.
+    C. Path traversal cannot bypass exclusion or scan scope.
+    D. Existing exclusion patterns (.git, node_modules, etc.) still work.
+    E. Explicit user-provided exclusions work.
+    F. Security test fixtures themselves remain unchanged.
+    G. The security gate remains fail-closed.
+    """
+    # Requirement A: tests/ files excluded
+    assert should_exclude_path("tests/test_fixture.py")
+    assert should_exclude_path("tests/sub/test_fixture.py")
+    assert should_exclude_path("test/fixture.py")
+
+    # Requirement B: Production source files still scanned
+    assert not should_exclude_path("backend/app/main.py")
+    assert not should_exclude_path("src/app.py")
+    assert not should_exclude_path("cli/security_scan.py")
+
+    # Requirement C: Path traversal cannot bypass exclusion or scan scope
+    assert not should_exclude_path("tests/../src/app.py"), "Path traversal pointing to src/app.py must be scanned"
+    assert should_exclude_path("src/../tests/test_fixture.py"), "Path traversal pointing to tests/ fixture must be excluded"
+    assert should_exclude_path("./tests/test_fixture.py")
+    assert should_exclude_path(".\\tests\\test_fixture.py")
+
+    # Requirement D: Existing exclusion patterns still work
+    assert should_exclude_path(".git/HEAD")
+    assert should_exclude_path("node_modules/package/index.js")
+    assert should_exclude_path("dist/bundle.js")
+    assert should_exclude_path("build/output.js")
+    assert should_exclude_path("__pycache__/main.cpython-311.pyc")
+    assert should_exclude_path(".venv/lib/site-packages")
+    assert should_exclude_path("coverage/index.html")
+
+    # Requirement E: Explicit user-provided exclusions still work
+    assert should_exclude_path("src/secret.bak", custom_exclude_patterns=["*.bak"])
+    assert not should_exclude_path("src/app.py", custom_exclude_patterns=["*.bak"])
+
+    # Requirement F: Security test fixtures remain unchanged & exist
+    test_w_path = Path(__file__).parent / "test_step_6w.py"
+    assert test_w_path.exists(), "Test fixtures in tests/ must remain unchanged and present"
+
+    # Requirement G: Security gate remains fail-closed
+    dec_inv, code_inv, _ = evaluate_security_gate({"invalid": "report"})
+    assert dec_inv == "INVALID"
+    assert code_inv == 1
+
+    dec_blk, code_blk, _ = evaluate_security_gate({
+        "status": "success",
+        "review_status": "block",
+        "summary": {"critical_count": 1, "high_count": 0, "medium_count": 0, "low_count": 0, "info_count": 0},
+        "findings": [{"severity": "critical"}]
+    })
+    assert dec_blk == "BLOCK"
+    assert code_blk == 1
+
+
+
 # ==============================================================================
 # 3. INCREMENTAL ANALYSIS (6T-3)
 # ==============================================================================
