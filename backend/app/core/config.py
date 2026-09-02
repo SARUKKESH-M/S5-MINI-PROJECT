@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # Vector Store & RAG Storage Path
     CHROMA_DB_PATH: str = "./data/chroma"
 
+    # Security Hardening Baseline Settings
+    MAX_REQUEST_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB maximum request payload size
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000"
+    ENABLE_SECURITY_HEADERS: bool = True
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

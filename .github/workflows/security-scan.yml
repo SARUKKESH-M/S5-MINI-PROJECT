@@ -36,20 +36,20 @@ jobs:
 
       - name: Run CodeSentinel Static Security Scan
         env:
-          PYTHONPATH: .
+          PYTHONPATH: .:backend
         run: |
           python -m backend.analysis.security_scan --target-dir . --output security-report.json
 
       - name: Generate GitHub Actions Security Summary
         env:
-          PYTHONPATH: .
+          PYTHONPATH: .:backend
         if: always()
         run: |
           python -m backend.analysis.ci_report --report security-report.json --append-step-summary
 
       - name: Evaluate CodeSentinel Security Gate
         env:
-          PYTHONPATH: .
+          PYTHONPATH: .:backend
         run: |
           python -m backend.analysis.security_gate --report security-report.json
 
