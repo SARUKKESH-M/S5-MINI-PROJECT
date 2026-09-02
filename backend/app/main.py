@@ -9,6 +9,7 @@ try:
     from backend.app.api.repository import router as repository_router
     from backend.app.api.repository_analysis import router as repository_analysis_router
     from backend.app.api.github_webhooks import router as github_webhooks_router
+    from backend.app.api.platform import router as platform_router
     from backend.app.core.config import settings
     from backend.app.core.security import (
         RequestSizeLimitMiddleware,
@@ -22,6 +23,7 @@ except ImportError:
     from app.api.repository import router as repository_router
     from app.api.repository_analysis import router as repository_analysis_router
     from app.api.github_webhooks import router as github_webhooks_router
+    from app.api.platform import router as platform_router
     from app.core.config import settings
     from app.core.security import (
         RequestSizeLimitMiddleware,
@@ -65,6 +67,7 @@ app.include_router(history_router)
 app.include_router(repository_router)
 app.include_router(repository_analysis_router)
 app.include_router(github_webhooks_router)
+app.include_router(platform_router)
 
 
 @app.get("/")

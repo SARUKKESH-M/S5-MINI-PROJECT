@@ -1,0 +1,54 @@
+# CodeSentinel — Production Docker Build Context Exclusion Rules
+
+# Version control & CI/CD
+.git
+.github
+.gitignore
+
+# Virtual environments
+.venv
+venv
+ENV/
+env/
+
+# Node modules & Frontend build outputs
+node_modules
+frontend/node_modules
+frontend/dist
+
+# Python bytecode & caches
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.coverage
+htmlcov/
+*.egg-info
+
+# Environment variables & secrets
+.env
+.env.*
+secrets/
+credentials/
+*.pem
+*.key
+
+# Persistent runtime data & caches
+data/chroma
+data/cache
+*.sqlite
+*.sqlite3
+*.db
+
+# Temporary & log files
+*.tmp
+*.log
+scratch/
+reports/
+
+# IDE & OS metadata
+.idea
+.vscode
+.DS_Store
+Thumbs.db
