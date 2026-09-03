@@ -30,7 +30,7 @@ All runtime options are environment-driven. Secrets MUST ONLY be supplied via en
 | `GROQ_API_KEY` | *(Secret)* | Primary LLM API key. |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Fallback LLM endpoint URL. |
 | `GITHUB_TOKEN` | *(Secret)* | Optional GitHub Personal Access Token for PR integrations. |
-| `WEBHOOK_SECRET` | *(Secret)* | Optional HMAC SHA-256 secret for GitHub webhook verification. |
+| `GITHUB_WEBHOOK_SECRET` | *(Secret)* | Optional HMAC SHA-256 secret for GitHub webhook verification. |
 | `CHROMA_DB_PATH` | `/app/data/chroma` | Persistent vector store directory path. |
 
 ---
@@ -39,7 +39,7 @@ All runtime options are environment-driven. Secrets MUST ONLY be supplied via en
 
 ### Build Docker Image
 ```bash
-docker build -t codesentinel:latest .
+docker build -t codesentinel:1.0.0 .
 ```
 
 ### Run Container
@@ -51,7 +51,7 @@ docker run -d \
   -e DEBUG=False \
   -e ALLOWED_ORIGINS="http://localhost:3000" \
   -e GROQ_API_KEY="your_groq_api_key_placeholder" \
-  codesentinel:latest
+  codesentinel:1.0.0
 ```
 
 ---
@@ -86,6 +86,9 @@ curl -s http://localhost:8000/platform/health
 
 # Check platform readiness
 curl -s http://localhost:8000/platform/readiness
+
+# Check platform release readiness
+curl -s http://localhost:8000/platform/readiness/release
 
 # Check platform info and capabilities
 curl -s http://localhost:8000/platform/info
