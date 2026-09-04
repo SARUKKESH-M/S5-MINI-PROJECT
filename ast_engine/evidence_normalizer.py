@@ -10,7 +10,7 @@ from ast_engine.structural_analyzer import analyze_python_structure
 from ast_engine.security_analyzer import analyze_security_structure
 
 
-def normalize_security_evidence(source_code: str) -> Dict[str, Any]:
+def normalize_security_evidence(source_code: str, file_path: str = "") -> Dict[str, Any]:
     """Normalize Python source AST evidence into a deterministic schema for RAG.
 
     Returns a JSON-serializable dictionary containing:
@@ -25,7 +25,7 @@ def normalize_security_evidence(source_code: str) -> Dict[str, Any]:
     """
     # Compose existing structural and security analysis functions
     struct_res = analyze_python_structure(source_code)
-    sec_res = analyze_security_structure(source_code)
+    sec_res = analyze_security_structure(source_code, file_path=file_path)
 
     # Determine unified parse status
     if struct_res.get("parse_status") == "error" or sec_res.get("parse_status") == "error":
@@ -64,12 +64,21 @@ def normalize_security_evidence(source_code: str) -> Dict[str, Any]:
             signal_types_order.append(sig_type)
 
         normalized_evidence.append({
-            "id": f"security_signal_{idx}",
+            "id": signal.get("evidence_id", f"security_signal_{idx}"),
+            "evidence_id": signal.get("evidence_id", f"security_signal_{idx}"),
+            "file_path": signal.get("file_path", file_path),
             "type": sig_type,
+            "signal_type": sig_type,
             "name": sig_name,
             "line": sig_line,
             "evidence": sig_evidence,
             "related_variables": sig_vars,
+            "category": signal.get("category", ""),
+            "severity": signal.get("severity", ""),
+            "confidence": signal.get("confidence", ""),
+            "call_name": signal.get("call_name", sig_name),
+            "argument_assessment": signal.get("argument_assessment", {}),
+            "message": signal.get("message", ""),
         })
 
     # Build RAG Context
@@ -81,6 +90,7 @@ def normalize_security_evidence(source_code: str) -> Dict[str, Any]:
     return {
         "schema_version": "1.0",
         "language": "python",
+        "file_path": file_path,
         "parse_status": parse_status,
         "code_summary": code_summary,
         "imports": imports,

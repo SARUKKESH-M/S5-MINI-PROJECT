@@ -12,13 +12,12 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from ast_engine.rag_adapter import prepare_ast_documents_for_rag
+from ast_engine.evidence_normalizer import normalize_security_evidence
 from rag.ingestion import ingest_documents
 from rag.vector_store import DEFAULT_COLLECTION_NAME
-from rag.hybrid_retrieval import retrieve_hybrid_context
-from rag.context_ranker import rank_and_deduplicate_context
-from rag.context_builder import build_security_analysis_context
-from llm.analyzer import analyze_security_context
 from backend.analysis.storage.store import AnalysisStore
+from backend.analysis.deterministic_findings import generate_deterministic_findings
+from backend.analysis.finding_enrichment import enrich_findings
 
 try:
     from backend.repository.analyzer import prepare_repository_analysis_files
@@ -164,6 +163,7 @@ def analyze_repository(
 
     # 4. Extract AST documents across readable source files & apply Caching
     all_ast_docs: List[Dict[str, Any]] = []
+    all_security_evidence: List[Dict[str, Any]] = []
     cache_hits = 0
     cache_misses = 0
 
@@ -179,8 +179,9 @@ def analyze_repository(
             content_hash = analysis_cache.compute_file_hash(src)
             cache_key = analysis_cache.generate_cache_key(path_str, content_hash, policy.name)
             cached_ast = analysis_cache.get(cache_key)
-            if cached_ast and "ast_docs" in cached_ast:
+            if cached_ast and "ast_docs" in cached_ast and "security_evidence" in cached_ast:
                 all_ast_docs.extend(cached_ast["ast_docs"])
+                all_security_evidence.extend(cached_ast["security_evidence"])
                 cache_hits += 1
                 metrics_collector.increment("cache_hits_total")
                 continue
@@ -191,13 +192,16 @@ def analyze_repository(
         # Pass Python source files to AST engine
         if f_item["language"] == "python":
             try:
-                ast_docs = prepare_ast_documents_for_rag(src)
+                normalized_evidence = normalize_security_evidence(src, file_path=path_str)
+                security_evidence = normalized_evidence.get("security_evidence", [])
+                ast_docs = prepare_ast_documents_for_rag(src, file_path=path_str)
                 all_ast_docs.extend(ast_docs)
+                all_security_evidence.extend(security_evidence)
 
                 if enable_cache:
                     content_hash = analysis_cache.compute_file_hash(src)
                     cache_key = analysis_cache.generate_cache_key(path_str, content_hash, policy.name)
-                    analysis_cache.set(cache_key, {"file_path": path_str, "ast_docs": ast_docs})
+                    analysis_cache.set(cache_key, {"file_path": path_str, "ast_docs": ast_docs, "security_evidence": security_evidence})
             except Exception:
                 # Malformed Python source must not crash the entire repository analysis
                 pass
@@ -219,26 +223,10 @@ def analyze_repository(
         except Exception:
             pass
 
-    # 6. Execute RAG Retrieval, Ranking, and LLM Analysis
-    hybrid_result = retrieve_hybrid_context(clean_query, top_k_ast=5, top_k_knowledge=5)
-    ranked_result = rank_and_deduplicate_context(hybrid_result, top_k=10)
-    llm_context = build_security_analysis_context(clean_query, top_k=5)
-    analyzer_response = analyze_security_context(llm_context)
-
-    raw_findings = analyzer_response.get("findings", [])
-
-    # 7. Extract valid document IDs from context for evidence grounding
-    valid_doc_ids = set()
-    ctx = llm_context.get("context", {})
-    if isinstance(ctx, dict):
-        for sec in ("security_evidence", "code_structure", "security_knowledge"):
-            for doc_item in ctx.get(sec, []):
-                if isinstance(doc_item, dict) and doc_item.get("document_id"):
-                    valid_doc_ids.add(str(doc_item["document_id"]))
-
-    for doc_item in llm_context.get("context_documents", []):
-        if isinstance(doc_item, dict) and doc_item.get("document_id"):
-            valid_doc_ids.add(str(doc_item["document_id"]))
+    # 6. Deterministic findings precede optional per-category RAG enrichment.
+    raw_findings = generate_deterministic_findings(all_security_evidence)
+    enriched_findings = enrich_findings(raw_findings, db_path=db_path)
+    valid_doc_ids = {str(item.get("evidence_id")) for item in all_security_evidence if item.get("evidence_id")}
 
     # Step 6N: Normalize, Ground, Deduplicate & Aggregate Findings
     try:
@@ -248,7 +236,7 @@ def analyze_repository(
         from analysis.finding_normalizer import normalize_findings
         from analysis.finding_aggregator import aggregate_and_deduplicate_findings
 
-    normalized_raw = normalize_findings(raw_findings, valid_document_ids=valid_doc_ids)
+    normalized_raw = normalize_findings(enriched_findings, valid_document_ids=valid_doc_ids)
     agg_res = aggregate_and_deduplicate_findings(normalized_raw, file_stats=file_stats)
 
     duration_ms = (time.time() - start_time) * 1000.0

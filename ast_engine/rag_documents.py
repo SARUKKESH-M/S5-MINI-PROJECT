@@ -4,11 +4,12 @@ Converts normalized AST and security evidence into small, deterministic, RAG-rea
 Treats source code strictly as static, untrusted data without dynamic execution or secret exposure.
 """
 
+import hashlib
 from typing import Any, Dict, List
 from ast_engine.evidence_normalizer import normalize_security_evidence
 
 
-def build_rag_documents(source_code: str) -> List[Dict[str, Any]]:
+def build_rag_documents(source_code: str, file_path: str = "") -> List[Dict[str, Any]]:
     """Build deterministic RAG document objects from normalized AST evidence.
 
     Converts normalized evidence into a list of documents:
@@ -18,7 +19,7 @@ def build_rag_documents(source_code: str) -> List[Dict[str, Any]]:
 
     Returns JSON-serializable list of document dictionaries.
     """
-    normalized = normalize_security_evidence(source_code)
+    normalized = normalize_security_evidence(source_code, file_path=file_path)
     documents: List[Dict[str, Any]] = []
 
     schema_version = normalized.get("schema_version", "1.0")
@@ -53,8 +54,9 @@ def build_rag_documents(source_code: str) -> List[Dict[str, Any]]:
         f"Functions: {func_names_str}."
     )
 
+    path_key = hashlib.sha256(file_path.encode("utf-8")).hexdigest()[:12] if file_path else ""
     documents.append({
-        "document_id": "module_structure_1",
+        "document_id": f"module_structure_{path_key}" if path_key else "module_structure_1",
         "content": module_content,
         "metadata": {
             "schema_version": schema_version,
@@ -67,6 +69,7 @@ def build_rag_documents(source_code: str) -> List[Dict[str, Any]]:
             "signal_type": None,
             "signal_name": None,
             "source": "ast_engine",
+            "file_path": file_path,
         },
     })
 
@@ -102,7 +105,7 @@ def build_rag_documents(source_code: str) -> List[Dict[str, Any]]:
         )
 
         documents.append({
-            "document_id": f"function_structure_{idx}",
+            "document_id": f"function_structure_{path_key}_{idx}" if path_key else f"function_structure_{idx}",
             "content": fn_content,
             "metadata": {
                 "schema_version": schema_version,
@@ -115,6 +118,7 @@ def build_rag_documents(source_code: str) -> List[Dict[str, Any]]:
                 "signal_type": None,
                 "signal_name": None,
                 "source": "ast_engine",
+                "file_path": file_path,
             },
         })
 
@@ -137,7 +141,7 @@ def build_rag_documents(source_code: str) -> List[Dict[str, Any]]:
         )
 
         documents.append({
-            "document_id": f"security_evidence_{idx}",
+            "document_id": ev.get("evidence_id", f"security_evidence_{path_key}_{idx}" if path_key else f"security_evidence_{idx}"),
             "content": sec_content,
             "metadata": {
                 "schema_version": schema_version,
@@ -150,6 +154,9 @@ def build_rag_documents(source_code: str) -> List[Dict[str, Any]]:
                 "signal_type": sig_type,
                 "signal_name": sig_name,
                 "source": "ast_engine",
+                "file_path": ev.get("file_path", file_path),
+                "evidence_id": ev.get("evidence_id", ""),
+                "category": ev.get("category", ""),
             },
         })
 

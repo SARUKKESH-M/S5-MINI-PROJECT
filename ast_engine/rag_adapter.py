@@ -12,7 +12,7 @@ from typing import Any, Dict, List
 from ast_engine.rag_documents import build_rag_documents
 
 
-def prepare_ast_documents_for_rag(source_code: str) -> List[Dict[str, Any]]:
+def prepare_ast_documents_for_rag(source_code: str, file_path: str = "") -> List[Dict[str, Any]]:
     """Prepare RAG-compatible document objects from Python source code AST evidence.
 
     Composes build_rag_documents() and validates compliance with the RAG ingestion contract:
@@ -20,7 +20,7 @@ def prepare_ast_documents_for_rag(source_code: str) -> List[Dict[str, Any]]:
       - Metadata preserves schema_version, language, document_type, function_name, class_name, line_start, line_end, signal_type, signal_name, and source='ast_engine'
       - Raw secret values and full source code blocks are strictly excluded
     """
-    rag_docs = build_rag_documents(source_code)
+    rag_docs = build_rag_documents(source_code, file_path=file_path)
 
     # Ensure adapter output complies with standard RAG ingestion schema
     adapted_docs: List[Dict[str, Any]] = []
@@ -40,6 +40,9 @@ def prepare_ast_documents_for_rag(source_code: str) -> List[Dict[str, Any]]:
                 "signal_type": meta.get("signal_type"),
                 "signal_name": meta.get("signal_name"),
                 "source": meta.get("source", "ast_engine"),
+                "file_path": meta.get("file_path", file_path),
+                "evidence_id": meta.get("evidence_id", ""),
+                "category": meta.get("category", ""),
             },
         })
 

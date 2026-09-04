@@ -126,7 +126,13 @@ def normalize_finding(
         "severity": severity,
         "confidence": confidence,
         "category": category,
-        "evidence": valid_evidence
+        "evidence": valid_evidence,
+        "evidence_id": str(raw_finding.get("evidence_id") or valid_evidence[0]["document_id"]).strip(),
+        "file_path": _mask_secrets(str(raw_finding.get("file_path") or "")).strip(),
+        "line": raw_finding.get("line") if isinstance(raw_finding.get("line"), int) else valid_evidence[0].get("line_start"),
+        "source": str(raw_finding.get("source") or "ast").strip(),
+        "enriched_by": list(raw_finding.get("enriched_by", [])) if isinstance(raw_finding.get("enriched_by"), list) else [],
+        "recommendation": _mask_secrets(str(raw_finding.get("recommendation") or "")).strip(),
     }
 
     return normalized

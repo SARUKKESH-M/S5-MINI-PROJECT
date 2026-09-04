@@ -69,6 +69,7 @@ def aggregate_and_deduplicate_findings(
     for f in normalized_findings:
         cat = str(f.get("category", "")).lower().strip()
         title = str(f.get("title", "")).lower().strip()
+        stable_evidence_id = str(f.get("evidence_id", "")).strip()
         
         # Primary evidence signature
         ev_list = f.get("evidence", [])
@@ -77,9 +78,9 @@ def aggregate_and_deduplicate_findings(
             doc_id = str(primary_ev.get("document_id", ""))
             sig_type = str(primary_ev.get("signal_type", ""))
             sig_name = str(primary_ev.get("signal_name", ""))
-            identity_key = (cat, title, doc_id, sig_type, sig_name)
+            identity_key = ("evidence", stable_evidence_id) if stable_evidence_id else (cat, title, doc_id, sig_type, sig_name)
         else:
-            identity_key = (cat, title, "", "", "")
+            identity_key = ("evidence", stable_evidence_id) if stable_evidence_id else (cat, title, "", "", "")
 
         if identity_key not in groups:
             groups[identity_key] = []
@@ -121,7 +122,13 @@ def aggregate_and_deduplicate_findings(
             "severity": best_sev,
             "confidence": best_conf,
             "category": first.get("category", "General Security"),
-            "evidence": merged_evidence
+            "evidence": merged_evidence,
+            "evidence_id": first.get("evidence_id", ""),
+            "file_path": first.get("file_path", ""),
+            "line": first.get("line"),
+            "source": first.get("source", "ast"),
+            "enriched_by": first.get("enriched_by", []),
+            "recommendation": first.get("recommendation", ""),
         })
 
     # Sort merged findings deterministically:

@@ -127,3 +127,21 @@ class MockLLMProvider(LLMProvider):
             "finding_count": len(findings),
             "provider": "mock",
         }
+
+    def explain_findings(self, findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Add deterministic explanation provenance without creating or removing findings.
+
+        Stage 7A orchestration uses this method after AST finding generation.  The
+        legacy ``analyze`` method remains for the existing public 6H context API.
+        """
+        explained: List[Dict[str, Any]] = []
+        for finding in findings:
+            item = dict(finding)
+            if not item.get("recommendation"):
+                item["recommendation"] = "Review this security-sensitive operation and avoid untrusted dynamic input."
+            enriched_by = list(item.get("enriched_by", []))
+            if "mock_llm" not in enriched_by:
+                enriched_by.append("mock_llm")
+            item["enriched_by"] = enriched_by
+            explained.append(item)
+        return explained
