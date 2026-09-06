@@ -2,8 +2,26 @@
 
 from typing import Any, Dict, List
 
-_TITLES = {"unsafe_database_execution": "Potential SQL Injection Vulnerability", "command_execution_call": "Command Injection Risk", "dynamic_code_execution": "Arbitrary Dynamic Code Execution Risk", "possible_hardcoded_secret": "Possible Hardcoded Secret Detected", "credential_propagation_to_authorization_sink": "Credential Propagation to Authorization Header"}
-_CATEGORIES = {"sql_injection": "Injection", "command_execution": "Injection", "dynamic_code_execution": "Code Execution", "credential_management": "Credential Management", "credential_handling": "Credential Management"}
+_TITLES = {
+    "unsafe_database_execution": "Potential SQL Injection Vulnerability",
+    "command_execution_call": "Command Injection Risk",
+    "dynamic_code_execution": "Arbitrary Dynamic Code Execution Risk",
+    "possible_hardcoded_secret": "Possible Hardcoded Secret Detected",
+    "credential_propagation_to_authorization_sink": "Credential Propagation to Authorization Header",
+    "path_traversal_call": "Potential Path Traversal / Unsafe File Access",
+    "insecure_deserialization_call": "Insecure Deserialization Risk",
+    "dom_xss_call": "Cross-Site Scripting (DOM XSS) Vulnerability",
+}
+_CATEGORIES = {
+    "sql_injection": "Injection",
+    "command_execution": "Injection",
+    "dynamic_code_execution": "Code Execution",
+    "credential_management": "Credential Management",
+    "credential_handling": "Credential Management",
+    "path_traversal": "File Security",
+    "insecure_deserialization": "Deserialization",
+    "xss": "Cross-Site Scripting",
+}
 
 
 def generate_deterministic_findings(evidence_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

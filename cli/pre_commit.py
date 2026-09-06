@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     from ast_engine.security_analyzer import analyze_security_structure
     from ast_engine.structural_analyzer import analyze_javascript_structure
+    from ast_engine.javascript_security_analyzer import analyze_javascript_security_structure
     from backend.analysis.deterministic_findings import generate_deterministic_findings
     from backend.analysis.finding_aggregator import aggregate_and_deduplicate_findings
     from backend.analysis.report_service import build_repository_report
@@ -30,6 +31,7 @@ try:
 except ImportError:
     from ast_engine.security_analyzer import analyze_security_structure
     from ast_engine.structural_analyzer import analyze_javascript_structure
+    from ast_engine.javascript_security_analyzer import analyze_javascript_security_structure
     from analysis.deterministic_findings import generate_deterministic_findings
     from analysis.finding_aggregator import aggregate_and_deduplicate_findings
     from analysis.report_service import build_repository_report
@@ -331,6 +333,10 @@ def run_pre_commit_scan(repo_dir: str = ".") -> Tuple[Dict[str, Any], int]:
         if ext in (".js", ".jsx"):
             try:
                 analyze_javascript_structure(content)
+                sec_data = analyze_javascript_security_structure(content, file_path=f_path)
+                raw_evidence = sec_data.get("security_signals", [])
+                file_findings = generate_deterministic_findings(raw_evidence)
+                findings.extend(file_findings)
             except Exception:
                 pass
         else:

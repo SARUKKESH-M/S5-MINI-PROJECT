@@ -8,9 +8,35 @@ from ast_engine.python_parser import parse_python_source
 _SECRET_KEYWORDS = {"password", "passwd", "secret", "api_key", "apikey", "token", "access_token", "private_key", "credential", "auth"}
 _DB_EXEC_NAMES = {"execute", "executemany", "executescript"}
 _DYNAMIC_EXEC_NAMES = {"eval", "exec", "compile"}
-_FILE_OP_NAMES = {"open", "pathlib.Path.open", "os.remove", "os.unlink", "os.rmdir", "shutil.rmtree"}
+_FILE_OP_SINKS = {
+    "open",
+    "io.open",
+    "os.open",
+    "os.remove",
+    "os.unlink",
+    "os.rmdir",
+    "shutil.rmtree",
+    "pathlib.Path.open",
+    "Path.open",
+}
+_DESERIALIZATION_SINKS = {
+    "pickle.loads",
+    "pickle.load",
+    "_pickle.loads",
+    "_pickle.load",
+    "cPickle.loads",
+    "cPickle.load",
+}
 _NETWORK_OP_NAMES = {"requests.get", "requests.post", "requests.put", "requests.delete", "requests.patch", "httpx.get", "httpx.post", "httpx.put", "httpx.delete", "urllib.request.urlopen"}
 _IGNORED_VAR_NAMES = {"self", "cls", "True", "False", "None"}
+
+
+def _is_file_op_target(target: str) -> bool:
+    return target in _FILE_OP_SINKS
+
+
+def _is_deserialization_target(target: str) -> bool:
+    return target in _DESERIALIZATION_SINKS
 
 
 def _check_has_errors(node: Any) -> bool:
@@ -171,6 +197,40 @@ def analyze_security_structure(source_code: str, file_path: str = "") -> Dict[st
                     expression_kind = _expression_kind(arguments[0] if arguments else None)
                     add_signal("dynamic_code_execution", "dynamic_code_execution", "critical" if expression_kind != "literal" else "high", "high", target, line, _text(node), related,
                                "Dynamic code execution is invoked.", {"expression_kind": expression_kind, "dynamic_value_present": expression_kind != "literal"})
+                elif target and _is_file_op_target(target):
+                    path_node = arguments[0] if arguments else None
+                    if path_node is not None:
+                        path_kind = _expression_kind(path_node)
+                        if path_kind != "literal" and path_kind != "missing":
+                            if path_kind in {"string_concatenation", "f_string", "percent_formatting", "format_call"}:
+                                severity, confidence = "high", "high"
+                            else:
+                                severity, confidence = "medium", "medium"
+                            add_signal(
+                                "path_traversal_call",
+                                "path_traversal",
+                                severity,
+                                confidence,
+                                target,
+                                line,
+                                _text(node),
+                                related,
+                                "A file operation path is dynamically constructed or cannot be verified as static.",
+                                {"path_kind": path_kind, "dynamic_value_present": True},
+                            )
+                elif target and _is_deserialization_target(target):
+                    add_signal(
+                        "insecure_deserialization_call",
+                        "insecure_deserialization",
+                        "critical",
+                        "high",
+                        target,
+                        line,
+                        _text(node),
+                        related,
+                        "Insecure object deserialization is invoked on potentially untrusted input.",
+                        {"deserializer": target, "untrusted_input": True},
+                    )
             for child in node.children:
                 if child.type not in {"function_definition", "async_function_definition", "class_definition"}:
                     walk(child)

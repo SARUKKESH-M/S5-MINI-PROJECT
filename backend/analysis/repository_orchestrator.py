@@ -210,6 +210,12 @@ def analyze_repository(
                 # Process JavaScript via Tree-Sitter structural analyzer
                 from ast_engine.structural_analyzer import analyze_javascript_structure
                 analyze_javascript_structure(src)
+
+                # Process JavaScript via Tree-Sitter security analyzer
+                from ast_engine.javascript_security_analyzer import analyze_javascript_security_structure
+                sec_data = analyze_javascript_security_structure(src, file_path=path_str)
+                js_security_evidence = sec_data.get("security_signals", [])
+                all_security_evidence.extend(js_security_evidence)
             except Exception:
                 # Malformed JavaScript source must not crash the entire repository analysis
                 pass
