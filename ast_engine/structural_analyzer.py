@@ -320,3 +320,18 @@ def analyze_python_structure(source_code: str) -> Dict[str, Any]:
         "functions": functions_list,
         "imports": imports,
     }
+
+
+def analyze_javascript_structure(source_code: str) -> Dict[str, Any]:
+    """Analyze JavaScript source code and return a structured representation."""
+    from ast_engine.javascript_analyzer import analyze_javascript_structure as _analyze_js
+    return _analyze_js(source_code)
+
+
+def analyze_source_structure(source_code: str, language: str = "python") -> Dict[str, Any]:
+    """Analyze source code structure dispatched by language."""
+    clean_lang = (language or "python").lower().strip()
+    if clean_lang in ("javascript", "js", "jsx"):
+        return analyze_javascript_structure(source_code)
+    return analyze_python_structure(source_code)
+

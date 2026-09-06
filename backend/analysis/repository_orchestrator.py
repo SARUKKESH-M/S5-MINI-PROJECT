@@ -205,6 +205,14 @@ def analyze_repository(
             except Exception:
                 # Malformed Python source must not crash the entire repository analysis
                 pass
+        elif f_item["language"] == "javascript":
+            try:
+                # Process JavaScript via Tree-Sitter structural analyzer
+                from ast_engine.structural_analyzer import analyze_javascript_structure
+                analyze_javascript_structure(src)
+            except Exception:
+                # Malformed JavaScript source must not crash the entire repository analysis
+                pass
 
     # 5. Clear stale AST evidence & Ingest fresh repository AST documents into RAG vector store
     try:

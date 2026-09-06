@@ -5,10 +5,16 @@ and findings from persistent storage.
 """
 
 from typing import Any, Dict, Optional
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Body, HTTPException, Query, status
+from pydantic import BaseModel
 from backend.analysis.storage.store import AnalysisStore
 
 router = APIRouter(tags=["Analysis History"])
+
+
+class FalsePositiveRequest(BaseModel):
+    reason: Optional[str] = None
+    repository_id: Optional[str] = None
 
 
 def _get_store() -> AnalysisStore:
@@ -85,4 +91,93 @@ def delete_analysis_endpoint(analysis_id: str):
         "status": "success",
         "analysis_id": analysis_id,
         "deleted": True,
+    }
+
+
+@router.post("/analyses/{analysis_id}/findings/{finding_id}/false-positive")
+def mark_false_positive_endpoint(
+    analysis_id: str,
+    finding_id: str,
+    payload: Optional[FalsePositiveRequest] = None,
+):
+    """Mark a finding as false positive in persistent storage (idempotent)."""
+    store = _get_store()
+    analysis = store.get_analysis(analysis_id)
+    if not analysis:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Analysis '{analysis_id}' not found",
+        )
+
+    reason = payload.reason if payload else None
+    repo_id = payload.repository_id if payload else None
+
+    suppression = store.record_false_positive(
+        analysis_id=analysis_id,
+        finding_id=finding_id,
+        reason=reason,
+        repository_id=repo_id,
+    )
+    if not suppression:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Finding '{finding_id}' not found in analysis '{analysis_id}'",
+        )
+
+    return {
+        "status": "success",
+        "analysis_id": analysis_id,
+        "finding_id": finding_id,
+        "suppression": suppression,
+    }
+
+
+@router.get("/analyses/{analysis_id}/findings/{finding_id}/feedback")
+def get_finding_feedback_endpoint(analysis_id: str, finding_id: str):
+    """Retrieve false-positive feedback record for a specific finding."""
+    store = _get_store()
+    analysis = store.get_analysis(analysis_id)
+    if not analysis:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Analysis '{analysis_id}' not found",
+        )
+
+    feedback = store.get_false_positive(analysis_id=analysis_id, finding_id=finding_id)
+    is_fp = feedback is not None and feedback.get("status") == "ACTIVE"
+
+    return {
+        "status": "success",
+        "analysis_id": analysis_id,
+        "finding_id": finding_id,
+        "feedback": feedback,
+        "is_false_positive": is_fp,
+    }
+
+
+@router.delete("/analyses/{analysis_id}/findings/{finding_id}/false-positive")
+@router.post("/analyses/{analysis_id}/findings/{finding_id}/revoke-false-positive")
+def revoke_false_positive_endpoint(analysis_id: str, finding_id: str):
+    """Revoke false-positive feedback for a finding without deleting historical audit trail."""
+    store = _get_store()
+    analysis = store.get_analysis(analysis_id)
+    if not analysis:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Analysis '{analysis_id}' not found",
+        )
+
+    suppression = store.revoke_false_positive(analysis_id=analysis_id, finding_id=finding_id)
+    if not suppression:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"False-positive feedback for finding '{finding_id}' not found",
+        )
+
+    return {
+        "status": "success",
+        "analysis_id": analysis_id,
+        "finding_id": finding_id,
+        "revoked": True,
+        "suppression": suppression,
     }

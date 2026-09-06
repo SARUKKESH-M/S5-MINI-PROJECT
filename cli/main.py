@@ -103,6 +103,14 @@ def build_parser() -> argparse.ArgumentParser:
     # 10. version
     subparsers.add_parser("version", help="Display CodeSentinel CLI version information")
 
+    # 11. pre-commit
+    pre_commit_parser = subparsers.add_parser("pre-commit", help="Git pre-commit hook integration and staged analysis")
+    pre_commit_group = pre_commit_parser.add_mutually_exclusive_group()
+    pre_commit_group.add_argument("--install", action="store_true", help="Install CodeSentinel pre-commit hook into Git repository")
+    pre_commit_group.add_argument("--run", action="store_true", help="Execute pre-commit security scan on staged Git files")
+    pre_commit_parser.add_argument("--repo-dir", default=".", help="Target Git repository directory (default: '.')")
+    pre_commit_parser.add_argument("--json", action="store_true", help="Output raw JSON format")
+
     return parser
 
 
@@ -266,6 +274,39 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pre_commit(args: argparse.Namespace) -> int:
+    """Executes 'pre-commit' command (--install or --run)."""
+    try:
+        from cli.pre_commit import (
+            install_pre_commit_hook,
+            run_pre_commit_scan,
+            format_pre_commit_terminal,
+        )
+    except ImportError:
+        from pre_commit import (
+            install_pre_commit_hook,
+            run_pre_commit_scan,
+            format_pre_commit_terminal,
+        )
+
+    repo_dir = getattr(args, "repo_dir", ".")
+
+    if getattr(args, "install", False):
+        success, msg = install_pre_commit_hook(repo_dir=repo_dir)
+        print(sanitize_sensitive_text(msg))
+        return 0 if success else 1
+
+    # Default action is --run
+    report, exit_code = run_pre_commit_scan(repo_dir=repo_dir)
+
+    if getattr(args, "json", False):
+        print(format_json_output(report))
+    else:
+        print(format_pre_commit_terminal(report))
+
+    return exit_code
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Main CLI dispatcher entry point."""
     parser = build_parser()
@@ -286,6 +327,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "scan": cmd_scan_or_analyze,
         "gate": cmd_gate,
         "report": cmd_report,
+        "pre-commit": cmd_pre_commit,
     }
 
     handler = command_handlers.get(args.command)

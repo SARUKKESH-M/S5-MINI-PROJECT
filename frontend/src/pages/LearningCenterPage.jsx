@@ -1,163 +1,133 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import DataPanel from '../components/DataPanel';
 import MetricCard from '../components/MetricCard';
 import SeverityBadge from '../components/SeverityBadge';
-import ReviewStatusBanner from '../components/ReviewStatusBanner';
 import LabelCaps from '../components/LabelCaps';
 import StatusPip from '../components/StatusPip';
 import PrimaryButton from '../components/PrimaryButton';
 import SecondaryButton from '../components/SecondaryButton';
 import CodeViewer from '../components/CodeViewer';
 import EvidenceSnippet from '../components/EvidenceSnippet';
+import { getPlatformPolicies } from '../services/apiClient';
 
 export default function LearningCenterPage() {
   const navigate = useNavigate();
 
-  // Initial findings presentation list with interactive false-positive suppression state
-  const [findingsList, setFindingsList] = useState([
+  // 1. Real platform policy profiles from GET /platform/policies
+  const [platformPolicies, setPlatformPolicies] = useState([]);
+  const [selectedPolicyName, setSelectedPolicyName] = useState('default');
+  const [policiesLoading, setPoliciesLoading] = useState(true);
+
+  // 2. Educational Vulnerability Catalog & Normalization Examples
+  const educationalCatalog = [
     {
-      finding_id: 'finding_1',
-      title: 'Hardcoded Secret Assignment in App Config',
-      description: 'Detected hardcoded secret string literal assigned to JWT_SECRET in config initialization.',
+      id: 'EDU-01',
+      pattern_name: 'Command Injection Risk',
       severity: 'critical',
-      confidence: 'high',
-      category: 'security',
-      suppressed: false,
-      suppression_reason: null,
-      evidence: [
-        {
-          document_id: 'src/flask/config.py',
-          line_start: 42,
-          line_end: 42,
-          signal_type: 'AST_SECRET_LITERAL',
-          signal_name: 'jwt_secret_assignment',
-          lines: [
-            '# Flask Config Settings',
-            'DEBUG = True',
-            'JWT_SECRET = "[REDACTED_SECRET]"  # Hardcoded secret literal',
-            'SESSION_COOKIE_SECURE = True'
-          ]
-        }
-      ]
+      cwe: 'CWE-78: OS Command Injection',
+      detection_mechanism: 'AST CallNode targeting `os.system` or `subprocess.Popen(..., shell=True)` with dynamic parameters.',
+      remediation_guidance: 'Use argument lists with `subprocess.run(["cmd", arg])` and avoid `shell=True` to prevent arbitrary command concatenation.',
+      normalization_criteria: 'Genuine security violation in production code. Legitimate test mocks must be excluded via path scope rules.',
+      example_lines: [
+        '# Vulnerable: User input passed to shell',
+        'import os',
+        'def execute_backup(target_path):',
+        '    os.system("tar -czf backup.tar.gz " + target_path)  # INJECTION RISK',
+        '',
+        '# Remediated: Parameterized execution without shell',
+        'import subprocess',
+        'def execute_backup_safe(target_path):',
+        '    subprocess.run(["tar", "-czf", "backup.tar.gz", target_path], check=True)'
+      ],
+      highlightRange: { start: 4, end: 4 }
     },
     {
-      finding_id: 'finding_2',
-      title: 'Unsafe Pickle Deserialization Invocations',
-      description: 'Legacy session decoder uses pickle.loads on unauthenticated bytes.',
+      id: 'EDU-02',
+      pattern_name: 'Arbitrary Dynamic Code Execution',
       severity: 'critical',
-      confidence: 'high',
-      category: 'security',
-      suppressed: false,
-      suppression_reason: null,
-      evidence: [
-        {
-          document_id: 'src/flask/sessions.py',
-          line_start: 108,
-          line_end: 108,
-          signal_type: 'AST_DESERIALIZATION',
-          signal_name: 'pickle_loads_invocation',
-          lines: [
-            'def load_session(raw_bytes):',
-            '    # Legacy session decoder',
-            '    return pickle.loads(raw_bytes)  # Unsafe deserialization vector'
-          ]
-        }
-      ]
+      cwe: 'CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code',
+      detection_mechanism: 'AST CallNode targeting builtins `eval()` or `exec()` with non-constant expressions.',
+      remediation_guidance: 'Replace `eval()` with `ast.literal_eval()` for literal data structures, or use explicit dictionary mapping for dynamic dispatch.',
+      normalization_criteria: 'Strictly prohibited by production security gates. High risk of remote code execution.',
+      example_lines: [
+        '# Vulnerable: Dynamic eval of untrusted string',
+        'def parse_config_value(raw_str):',
+        '    return eval(raw_str)  # ARBITRARY CODE EXECUTION',
+        '',
+        '# Remediated: Safe literal evaluation',
+        'import ast',
+        'def parse_config_value_safe(raw_str):',
+        '    return ast.literal_eval(raw_str)'
+      ],
+      highlightRange: { start: 3, end: 3 }
     },
     {
-      finding_id: 'finding_3',
-      title: 'Test Dummy Secret in Test Suite Helper',
-      description: 'Test mock secret key detected in test/fixtures/mock_auth.py.',
-      severity: 'medium',
-      confidence: 'medium',
-      category: 'security',
-      suppressed: true,
-      suppression_reason: 'Marked as false positive: Test fixture mock credential',
-      evidence: [
-        {
-          document_id: 'tests/fixtures/mock_auth.py',
-          line_start: 15,
-          line_end: 15,
-          signal_type: 'AST_SECRET_LITERAL',
-          signal_name: 'mock_test_credential',
-          lines: [
-            '# Test Mock Credentials',
-            'MOCK_API_KEY = "test_key_12345_mock"  # Test fixture'
-          ]
-        }
-      ]
+      id: 'EDU-03',
+      pattern_name: 'Hardcoded Secret Assignment',
+      severity: 'critical',
+      cwe: 'CWE-798: Use of Hard-coded Credentials',
+      detection_mechanism: 'AST AssignNode assigning high-entropy string literals to variable keys matching credential regexes.',
+      remediation_guidance: 'Retrieve credentials at runtime via environment variables (`os.getenv`) or vault secret providers.',
+      normalization_criteria: 'Test mock credentials in `tests/` directories can be safely excluded by configuring repository path filters.',
+      example_lines: [
+        '# Vulnerable: Literal API key in source',
+        'API_KEY = "sk-live-9823478923489234"  # HARDCODED SECRET',
+        '',
+        '# Remediated: Dynamic runtime environment lookup',
+        'import os',
+        'API_KEY = os.getenv("API_KEY")'
+      ],
+      highlightRange: { start: 2, end: 2 }
     },
     {
-      finding_id: 'finding_4',
-      title: 'Internal Debug Logger Invocations',
-      description: 'Verbose debug log statement in development helper script.',
-      severity: 'low',
-      confidence: 'low',
-      category: 'security',
-      suppressed: true,
-      suppression_reason: 'Marked as false positive: Internal dev script logging',
-      evidence: [
-        {
-          document_id: 'src/flask/cli.py',
-          line_start: 92,
-          line_end: 92,
-          signal_type: 'AST_LOGGER',
-          signal_name: 'verbose_debug_print',
-          lines: [
-            'def debug_dump(ctx):',
-            '    print("DEBUG CTX:", ctx)'
-          ]
-        }
-      ]
+      id: 'EDU-04',
+      pattern_name: 'Unsafe Object Deserialization',
+      severity: 'high',
+      cwe: 'CWE-502: Deserialization of Untrusted Data',
+      detection_mechanism: 'AST CallNode invoking `pickle.loads()` on input derived from network sockets or request cookies.',
+      remediation_guidance: 'Use safe serialization formats like JSON, MessagePack, or signed cryptographic envelopes (HMAC).',
+      normalization_criteria: 'Review finding; permitted only in trusted intra-cluster RPC if cryptographically verified.',
+      example_lines: [
+        '# Vulnerable: Untrusted pickle deserialization',
+        'import pickle',
+        'def handle_session(raw_cookie):',
+        '    return pickle.loads(raw_cookie)  # UNSAFE DESERIALIZATION',
+        '',
+        '# Remediated: Standard JSON parsing',
+        'import json',
+        'def handle_session_safe(raw_cookie):',
+        '    return json.loads(raw_cookie)'
+      ],
+      highlightRange: { start: 4, end: 4 }
     }
-  ]);
+  ];
 
-  // Policy tuning preset state
-  const [selectedPolicy, setSelectedPolicy] = useState('BALANCED');
-  const [filterType, setFilterType] = useState('ALL');
-  const [selectedFindingId, setSelectedFindingId] = useState('finding_1');
+  const [selectedPatternId, setSelectedPatternId] = useState('EDU-01');
+  const activePattern = educationalCatalog.find(p => p.id === selectedPatternId) || educationalCatalog[0];
 
-  // Compute telemetry metrics dynamically from presentation state
-  const totalFindings = 17;
-  const suppressedCount = findingsList.filter((f) => f.suppressed).length + 1; // 3 in presentation state
-  const confirmedCount = totalFindings - suppressedCount;
-  const candidateCount = 2;
-
-  // Filtered findings list
-  const filteredFindings = findingsList.filter((f) => {
-    if (filterType === 'SUPPRESSED') return f.suppressed;
-    if (filterType === 'CRITICAL') return f.severity.toUpperCase() === 'CRITICAL';
-    if (filterType === 'HIGH') return f.severity.toUpperCase() === 'HIGH';
-    if (filterType === 'MEDIUM') return f.severity.toUpperCase() === 'MEDIUM';
-    if (filterType === 'LOW') return f.severity.toUpperCase() === 'LOW';
-    return true;
-  });
-
-  // Active finding object
-  const activeFinding =
-    findingsList.find((f) => f.finding_id === selectedFindingId) || findingsList[0];
-
-  const activeEvidence = activeFinding?.evidence?.[0];
-
-  // Toggle false-positive suppression status for selected finding
-  const handleToggleSuppression = (findingId) => {
-    setFindingsList((prev) =>
-      prev.map((item) => {
-        if (item.finding_id === findingId) {
-          const nextSuppressed = !item.suppressed;
-          return {
-            ...item,
-            suppressed: nextSuppressed,
-            suppression_reason: nextSuppressed
-              ? 'Marked as false positive: Manually tuned policy override'
-              : null
-          };
+  // Fetch real policy profiles from backend
+  useEffect(() => {
+    let isMounted = true;
+    getPlatformPolicies()
+      .then((policies) => {
+        if (!isMounted) return;
+        if (Array.isArray(policies) && policies.length > 0) {
+          setPlatformPolicies(policies);
+          setSelectedPolicyName(policies[0].name);
         }
-        return item;
       })
-    );
-  };
+      .catch(() => {
+        // Handled gracefully
+      })
+      .finally(() => {
+        if (isMounted) setPoliciesLoading(false);
+      });
+
+    return () => { isMounted = false; };
+  }, []);
+
+  const activePolicy = platformPolicies.find(p => p.name === selectedPolicyName) || null;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '1400px', margin: '0 auto', width: '100%' }}>
@@ -168,128 +138,148 @@ export default function LearningCenterPage() {
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
               <LabelCaps style={{ fontSize: '11px', color: 'var(--primary-cyan)' }}>
-                FINDING NORMALIZATION &amp; POLICY TUNING WORKSPACE
+                EDUCATIONAL WORKSPACE &amp; SECURITY POLICY GUIDANCE
               </LabelCaps>
-              <StatusPip status="cyan" title="Normalization Engine Operational" />
+              <StatusPip status="green" title="Educational Knowledge Base Active" />
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--status-green)' }}>
+                STATIC AST + STEP 6O RULES
+              </span>
             </div>
             <h1 style={{ margin: 0, fontSize: '22px', fontWeight: 700, color: 'var(--text-on-surface)' }}>
-              False-Positive Learning Center
+              Security Learning Center
             </h1>
             <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: 'var(--text-on-surface-variant)' }}>
-              Normalize findings, tune false-positive suppression rules, and train deterministic false-positive filters.
+              Reference guide for CodeSentinel AST signal patterns, false-positive normalization criteria, and server-side policy enforcement profiles.
             </p>
           </div>
 
           <div style={{ display: 'flex', gap: '8px' }}>
-            <SecondaryButton icon="search" onClick={() => navigate('/vulnerability-explorer')}>
-              VULNERABILITY EXPLORER
+            <SecondaryButton icon="alt_route" onClick={() => navigate('/pr-review')}>
+              PR REVIEW
             </SecondaryButton>
             <SecondaryButton icon="psychology" onClick={() => navigate('/ai-analysis')}>
-              AI ANALYSIS CENTER
+              AI ANALYSIS
+            </SecondaryButton>
+            <SecondaryButton icon="dashboard" onClick={() => navigate('/command-center')}>
+              COMMAND CENTER
             </SecondaryButton>
           </div>
         </div>
       </DataPanel>
 
-      {/* 2. Normalization Telemetry Bento Grid */}
+      {/* 2. Educational Principles Bento Grid */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
         <MetricCard
-          label="TOTAL FINDINGS"
-          value={totalFindings}
-          delta="REPOSITORY AUDIT SCOPE"
+          label="AST PARSING PRINCIPLE"
+          value="NON-EXEC"
+          delta="Static Text Inspection"
           accentColor="cyan"
         />
         <MetricCard
-          label="SUPPRESSED FINDINGS"
-          value={suppressedCount}
-          delta="FALSE POSITIVES TUNED"
+          label="FALSE POSITIVES"
+          value="SCOPE-BASED"
+          delta="Path Exclusions &amp; Context"
           accentColor="amber"
         />
         <MetricCard
-          label="CONFIRMED FINDINGS"
-          value={confirmedCount}
-          delta="ACTIVE SECURITY RISKS"
+          label="GATE AUTHORITY"
+          value="SERVER-SIDE"
+          delta="Fail-Closed Verification"
           accentColor="red"
         />
         <MetricCard
-          label="LEARNING CANDIDATES"
-          value={candidateCount}
-          delta="AUTO-TUNING PATTERNS"
+          label="SECURITY STANDARDS"
+          value="CWE / OWASP"
+          delta="Evidence Grounding"
           accentColor="green"
         />
       </div>
 
-      {/* 3. Rule Tuning & Policy Presets Panel */}
-      <DataPanel title="SECURITY POLICY RULE PRESET TUNING" status="cyan">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <LabelCaps style={{ fontSize: '10px' }}>POLICY PRESET:</LabelCaps>
-            {['STRICT SECURITY', 'BALANCED', 'DEVELOPMENT'].map((policy) => (
-              <button
-                key={policy}
-                onClick={() => setSelectedPolicy(policy)}
-                style={{
-                  backgroundColor: selectedPolicy === policy ? 'var(--primary-cyan)' : 'var(--bg-void-lowest)',
-                  color: selectedPolicy === policy ? 'var(--text-inverse)' : 'var(--text-on-surface-variant)',
-                  border: '1px solid var(--border-subtle)',
-                  borderRadius: 'var(--radius-xs)',
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  padding: '6px 14px',
-                  cursor: 'pointer'
-                }}
-              >
-                {policy}
-              </button>
-            ))}
-          </div>
-
-          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-dim)' }}>
-            CURRENT POLICY: <strong style={{ color: 'var(--primary-cyan)' }}>{selectedPolicy}</strong> (Suppresses test mocks &amp; internal logs)
-          </div>
-        </div>
-      </DataPanel>
-
-      {/* 4. Master Findings Table & Grounded Evidence Inspector */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, 1fr)', gap: '16px' }}>
-        
-        {/* Left Findings Master List Panel (5 cols) */}
-        <div style={{ gridColumn: 'span 5' }}>
-          <DataPanel
-            title="FINDINGS NORMALIZATION LIST"
-            status="amber"
-            action={
-              <div style={{ display: 'flex', gap: '4px' }}>
-                {['ALL', 'CRITICAL', 'HIGH', 'SUPPRESSED'].map((filter) => (
+      {/* 3. Real Server-Side Security Policy Profiles (from /platform/policies) */}
+      <DataPanel title="PRODUCTION SECURITY POLICY ENFORCEMENT PROFILES" status="green">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <LabelCaps style={{ fontSize: '10px' }}>SELECT PROFILE TO INSPECT:</LabelCaps>
+              {platformPolicies.map((p) => {
+                const isSelected = p.name === selectedPolicyName;
+                return (
                   <button
-                    key={filter}
-                    onClick={() => setFilterType(filter)}
+                    key={p.name}
+                    type="button"
+                    onClick={() => setSelectedPolicyName(p.name)}
                     style={{
-                      backgroundColor: filterType === filter ? 'var(--primary-cyan)' : 'var(--bg-void-lowest)',
-                      color: filterType === filter ? 'var(--text-inverse)' : 'var(--text-on-surface-variant)',
+                      backgroundColor: isSelected ? 'var(--primary-cyan)' : 'var(--bg-void-lowest)',
+                      color: isSelected ? 'var(--text-inverse)' : 'var(--text-on-surface-variant)',
                       border: '1px solid var(--border-subtle)',
                       borderRadius: 'var(--radius-xs)',
                       fontFamily: 'var(--font-mono)',
-                      fontSize: '10px',
+                      fontSize: '11px',
                       fontWeight: 700,
-                      padding: '3px 8px',
-                      cursor: 'pointer'
+                      padding: '5px 12px',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease-in-out'
                     }}
                   >
-                    {filter}
+                    {p.name.toUpperCase()}
                   </button>
-                ))}
+                );
+              })}
+            </div>
+
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-dim)' }}>
+              Server-enforced via backend policy engine
+            </span>
+          </div>
+
+          {activePolicy && (
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+              gap: '12px',
+              padding: '14px',
+              backgroundColor: 'var(--bg-void-lowest)',
+              border: '1px solid var(--border-subtle)',
+              borderRadius: 'var(--radius-xs)',
+              fontFamily: 'var(--font-mono)',
+              fontSize: '12px'
+            }}>
+              <div>
+                <span style={{ color: 'var(--text-dim)', display: 'block', fontSize: '10px' }}>SEVERITY THRESHOLD</span>
+                <span style={{ color: 'var(--primary-cyan)', fontWeight: 700, fontSize: '14px' }}>{activePolicy.severity_threshold}</span>
               </div>
-            }
-          >
+              <div>
+                <span style={{ color: 'var(--text-dim)', display: 'block', fontSize: '10px' }}>MAX AUDITED FILES</span>
+                <span style={{ color: 'var(--text-on-surface)', fontWeight: 600 }}>{activePolicy.max_files}</span>
+              </div>
+              <div>
+                <span style={{ color: 'var(--text-dim)', display: 'block', fontSize: '10px' }}>GATE ACTIONS</span>
+                <span style={{ color: 'var(--text-on-surface)' }}>{activePolicy.review_action} / {activePolicy.block_action}</span>
+              </div>
+              <div>
+                <span style={{ color: 'var(--text-dim)', display: 'block', fontSize: '10px' }}>BLOCK ON CRITICAL</span>
+                <span style={{ color: activePolicy.block_on_critical ? 'var(--critical-red)' : 'var(--text-dim)', fontWeight: 700 }}>
+                  {activePolicy.block_on_critical ? 'ENABLED' : 'DISABLED'}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      </DataPanel>
+
+      {/* 4. Educational Vulnerability Catalog & Code Remediation Patterns */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, 1fr)', gap: '16px' }}>
+        
+        {/* Left: Pattern Selection (5 cols) */}
+        <div style={{ gridColumn: 'span 5' }}>
+          <DataPanel title="VULNERABILITY PATTERNS CATALOG" status="cyan">
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              {filteredFindings.map((finding) => {
-                const isSelected = finding.finding_id === activeFinding?.finding_id;
+              {educationalCatalog.map((pattern) => {
+                const isSelected = pattern.id === selectedPatternId;
                 return (
                   <div
-                    key={finding.finding_id}
-                    onClick={() => setSelectedFindingId(finding.finding_id)}
+                    key={pattern.id}
+                    onClick={() => setSelectedPatternId(pattern.id)}
                     style={{
                       padding: '12px',
                       backgroundColor: isSelected ? 'var(--panel-bg-high)' : 'var(--bg-void-lowest)',
@@ -303,31 +293,15 @@ export default function LearningCenterPage() {
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <LabelCaps style={{ fontSize: '10px' }}>{finding.finding_id}</LabelCaps>
-                        {finding.suppressed && (
-                          <span style={{
-                            backgroundColor: 'rgba(254, 183, 0, 0.15)',
-                            color: 'var(--secondary-amber)',
-                            border: '1px solid var(--secondary-amber)',
-                            fontSize: '9px',
-                            fontWeight: 700,
-                            padding: '1px 5px',
-                            borderRadius: 'var(--radius-xs)',
-                            fontFamily: 'var(--font-mono)'
-                          }}>
-                            SUPPRESSED
-                          </span>
-                        )}
-                      </div>
-                      <SeverityBadge severity={finding.severity} />
+                      <LabelCaps style={{ fontSize: '10px' }}>{pattern.id}</LabelCaps>
+                      <SeverityBadge severity={pattern.severity} />
                     </div>
                     <div style={{ fontWeight: 600, fontSize: '13px', color: 'var(--text-on-surface)' }}>
-                      {finding.title}
+                      {pattern.pattern_name}
                     </div>
-                    <p style={{ margin: 0, fontSize: '12px', color: 'var(--text-dim)', lineHeight: 1.4 }}>
-                      {finding.description}
-                    </p>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--secondary-amber)' }}>
+                      {pattern.cwe}
+                    </div>
                   </div>
                 );
               })}
@@ -335,69 +309,49 @@ export default function LearningCenterPage() {
           </DataPanel>
         </div>
 
-        {/* Right Grounded Evidence & False-Positive Action Inspector (7 cols) */}
+        {/* Right: Detailed Remediation Guide & Example (7 cols) */}
         <div style={{ gridColumn: 'span 7' }}>
           <DataPanel
-            title={`FINDING NORMALIZATION INSPECTOR — ${activeFinding?.finding_id || ''}`}
+            title={`PATTERN GUIDE: ${activePattern.pattern_name.toUpperCase()}`}
             status="cyan"
-            action={<SeverityBadge severity={activeFinding?.severity || 'info'} />}
+            action={<SeverityBadge severity={activePattern.severity} />}
           >
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              {/* Finding Title & Description */}
-              <div style={{ padding: '12px', backgroundColor: 'var(--bg-void-lowest)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-xs)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                <div style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-on-surface)' }}>
-                  {activeFinding?.title}
-                </div>
-                <p style={{ margin: 0, fontSize: '13px', color: 'var(--text-on-surface-variant)', lineHeight: 1.5 }}>
-                  {activeFinding?.description}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              
+              {/* Detection Mechanism */}
+              <div style={{ padding: '10px 12px', backgroundColor: 'var(--bg-void-lowest)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-xs)' }}>
+                <LabelCaps style={{ fontSize: '10px', color: 'var(--primary-cyan)' }}>DETECTION MECHANISM</LabelCaps>
+                <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: 'var(--text-on-surface)', lineHeight: 1.5 }}>
+                  {activePattern.detection_mechanism}
                 </p>
-                {activeFinding?.suppressed && (
-                  <div style={{ marginTop: '4px', fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--secondary-amber)' }}>
-                    &gt; STATUS: SUPPRESSED ({activeFinding.suppression_reason})
-                  </div>
-                )}
               </div>
 
-              {/* False-Positive Toggle Action Button Bar */}
-              <div style={{ display: 'flex', items: 'center', justifyContent: 'space-between', padding: '12px', backgroundColor: 'var(--panel-bg-high)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-xs)' }}>
-                <div>
-                  <LabelCaps style={{ fontSize: '10px' }}>FALSE-POSITIVE NORMALIZATION ACTION</LabelCaps>
-                  <div style={{ fontSize: '12px', color: 'var(--text-dim)', marginTop: '2px' }}>
-                    Toggling suppression updates deterministic severity &amp; finding counts.
-                  </div>
-                </div>
-
-                <PrimaryButton
-                  icon={activeFinding?.suppressed ? 'undo' : 'do_not_disturb_on'}
-                  onClick={() => handleToggleSuppression(activeFinding.finding_id)}
-                >
-                  {activeFinding?.suppressed ? 'RESTORE AS CONFIRMED FINDING' : 'MARK AS FALSE POSITIVE / SUPPRESS'}
-                </PrimaryButton>
+              {/* Remediation Guidance */}
+              <div style={{ padding: '10px 12px', backgroundColor: 'var(--bg-void-lowest)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-xs)' }}>
+                <LabelCaps style={{ fontSize: '10px', color: 'var(--status-green)' }}>REMEDIATION GUIDANCE</LabelCaps>
+                <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: 'var(--text-on-surface)', lineHeight: 1.5 }}>
+                  {activePattern.remediation_guidance}
+                </p>
               </div>
 
-              {/* Evidence Snippet */}
-              {activeEvidence && (
-                <EvidenceSnippet
-                  documentId={activeEvidence.document_id}
-                  lineStart={activeEvidence.line_start}
-                  lineEnd={activeEvidence.line_end}
-                  signalType={activeEvidence.signal_type}
-                  signalName={activeEvidence.signal_name}
-                />
-              )}
+              {/* False Positive Normalization Criteria */}
+              <div style={{ padding: '10px 12px', backgroundColor: 'var(--bg-void-lowest)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-xs)' }}>
+                <LabelCaps style={{ fontSize: '10px', color: 'var(--secondary-amber)' }}>NORMALIZATION &amp; TUNING CRITERIA</LabelCaps>
+                <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: 'var(--text-on-surface)', lineHeight: 1.5 }}>
+                  {activePattern.normalization_criteria}
+                </p>
+              </div>
 
-              {/* Code Viewer */}
+              {/* Code Example Viewer */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                <LabelCaps style={{ fontSize: '10px' }}>STATIC SOURCE CODE EVIDENCE</LabelCaps>
+                <LabelCaps style={{ fontSize: '10px' }}>REMEDIATION CODE COMPARISON</LabelCaps>
                 <CodeViewer
-                  lines={activeEvidence?.lines || ['# Code snippet not loaded']}
-                  startLine={(activeEvidence?.line_start || 40) - 2}
-                  highlightRange={{
-                    start: activeEvidence?.line_start || 42,
-                    end: activeEvidence?.line_end || 42
-                  }}
+                  lines={activePattern.example_lines}
+                  startLine={1}
+                  highlightRange={activePattern.highlightRange}
                 />
               </div>
+
             </div>
           </DataPanel>
         </div>

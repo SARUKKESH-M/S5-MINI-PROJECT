@@ -135,6 +135,24 @@ class GitHubClient:
         """Executes GET request."""
         return self.request("GET", endpoint, params=params)
 
+    def post(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Executes POST request."""
+        return self.request("POST", endpoint, params=params, json_data=json_data)
+
+    def patch(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Executes PATCH request."""
+        return self.request("PATCH", endpoint, params=params, json_data=json_data)
+
     def __repr__(self) -> str:
         token_state = "SET" if self._token else "UNSET"
         return f"<GitHubClient base_url={self.base_url!r} token={token_state}>"

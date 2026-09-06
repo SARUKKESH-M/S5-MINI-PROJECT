@@ -6,66 +6,252 @@ import LabelCaps from '../components/LabelCaps';
 import StatusPip from '../components/StatusPip';
 import PrimaryButton from '../components/PrimaryButton';
 import SecondaryButton from '../components/SecondaryButton';
+import {
+  getPlatformHealth,
+  getPlatformReadiness,
+  getPlatformInfo,
+  getPlatformPolicies,
+  getPlatformMetrics
+} from '../services/apiClient';
 
 export default function SystemHealthPage() {
   const navigate = useNavigate();
 
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [healthStatus, setHealthStatus] = useState({
-    status: 'ok',
-    service: 'CodeSentinel Security OS API',
-    version: 'v1.0.0_STABLE',
-    uptime: '99.99%',
-    last_check: 'Just now'
+  const [lastChecked, setLastChecked] = useState('Initiating...');
+
+  // 1. Health state from GET /platform/health
+  const [healthData, setHealthData] = useState({
+    status: 'unknown',
+    service: 'CodeSentinel',
+    version: '1.0.0',
+    environment: 'development',
+    checks: null,
+    error: null
   });
 
-  // Services health status presentation list
-  const services = [
-    { name: 'FASTAPI ENGINE', status: 'green', detail: 'HTTP 200 OK — REST API Active', response: '12ms' },
-    { name: 'REDIS CACHE', status: 'green', detail: '99.9% Cache Hit Ratio', response: '1ms' },
-    { name: 'CELERY WORKERS', status: 'green', detail: 'IDLE_0 — 4 Worker Processes Ready', response: '3ms' },
-    { name: 'AI / ML MODELS', status: 'cyan', detail: 'MockLLMProvider v1.0 Model Loaded', response: '45ms' },
-    { name: 'SQLITE STORE', status: 'green', detail: 'Analysis Persistence DB Active', response: '4ms' },
-    { name: 'RAG / CHROMADB', status: 'cyan', detail: 'Vector Collection Connected', response: '18ms' }
-  ];
+  // 2. Readiness state from GET /platform/readiness
+  const [readinessData, setReadinessData] = useState({
+    state: 'UNKNOWN', // 'READY' | 'NOT READY' | 'UNKNOWN'
+    ready: null,
+    status: 'unknown',
+    timestampReady: null,
+    error: null
+  });
 
-  // Technical operational logs stream
-  const systemLogs = [
-    { id: 1, time: '14:08:12.450Z', component: 'HEALTH_CHECK', level: 'INFO', msg: 'System health check completed. All 6 services responding OK.' },
-    { id: 2, time: '14:05:30.120Z', component: 'LLM_ENGINE', level: 'INFO', msg: 'MockLLMProvider model initialized with zero-shot prompt template.' },
-    { id: 3, time: '14:02:15.890Z', component: 'RAG_CHROMADB', level: 'INFO', msg: 'ChromaDB persistent collection security_knowledge loaded (2 document collections).' },
-    { id: 4, time: '14:00:00.000Z', component: 'FASTAPI_APP', level: 'INFO', msg: 'CodeSentinel API Server listening on port 8000 (Workers: 4).' }
-  ];
+  // 3. Platform info state from GET /platform/info
+  const [platformInfo, setPlatformInfo] = useState({
+    service: 'CodeSentinel',
+    version: '1.0.0',
+    apiVersion: 'v1',
+    capabilities: [],
+    supportedModes: [],
+    supportedLanguages: [],
+    gateOutcomes: [],
+    error: null
+  });
 
-  // Refresh health diagnostics action
+  // 4. Platform policies state from GET /platform/policies
+  const [policies, setPolicies] = useState([]);
+  const [policiesError, setPoliciesError] = useState(null);
+
+  // 5. Telemetry metrics state from GET /platform/metrics
+  const [metrics, setMetrics] = useState({
+    requestsTotal: 0,
+    requestsSuccess: 0,
+    requestsFailed: 0,
+    decisionsAllow: 0,
+    decisionsBlock: 0,
+    decisionsReview: 0,
+    cacheHits: 0,
+    cacheMisses: 0,
+    healthChecksTotal: 0,
+    lastDurationMs: 0,
+    isAvailable: false,
+    error: null
+  });
+
+  // Operational event logs stream
+  const [eventLogs, setEventLogs] = useState([
+    {
+      id: 1,
+      time: new Date().toISOString().substring(11, 23) + 'Z',
+      component: 'BOOTSTRAP',
+      level: 'INFO',
+      msg: 'CodeSentinel frontend initializing real telemetry connectors.'
+    }
+  ]);
+
+  // Comprehensive refresh action
   const handleRefreshHealth = async () => {
     setIsRefreshing(true);
+    const nowTime = new Date().toLocaleTimeString();
+
     try {
-      const res = await fetch('http://localhost:8000/health');
-      if (res.ok) {
-        const data = await res.json();
-        setHealthStatus({
-          status: data.status || 'ok',
-          service: 'CodeSentinel Security OS API',
-          version: 'v1.0.0_STABLE',
-          uptime: '99.99%',
-          last_check: new Date().toLocaleTimeString()
+      const [healthRes, readinessRes, infoRes, policiesRes, metricsRes] = await Promise.allSettled([
+        getPlatformHealth(),
+        getPlatformReadiness(),
+        getPlatformInfo(),
+        getPlatformPolicies(),
+        getPlatformMetrics()
+      ]);
+
+      const newLogs = [];
+
+      // Process GET /platform/health
+      if (healthRes.status === 'fulfilled' && healthRes.value) {
+        const h = healthRes.value;
+        setHealthData({
+          status: h.status || 'healthy',
+          service: h.service || 'CodeSentinel',
+          version: h.version || '1.0.0',
+          environment: h.environment || 'development',
+          checks: h.checks || null,
+          error: null
+        });
+        newLogs.push({
+          id: Date.now() + 1,
+          time: new Date().toISOString().substring(11, 23) + 'Z',
+          component: 'PLATFORM_HEALTH',
+          level: h.status === 'healthy' ? 'INFO' : 'WARN',
+          msg: `Health check reported status: ${h.status?.toUpperCase()} (${Object.keys(h.checks || {}).length} checks evaluated)`
+        });
+      } else {
+        const err = healthRes.reason?.message || 'Health endpoint unreachable';
+        setHealthData(prev => ({ ...prev, status: 'unavailable', error: err }));
+        newLogs.push({
+          id: Date.now() + 1,
+          time: new Date().toISOString().substring(11, 23) + 'Z',
+          component: 'PLATFORM_HEALTH',
+          level: 'ERROR',
+          msg: `Health diagnostics failed: ${err}`
         });
       }
+
+      // Process GET /platform/readiness
+      if (readinessRes.status === 'fulfilled' && readinessRes.value) {
+        const r = readinessRes.value;
+        const isReady = r.ready === true;
+        setReadinessData({
+          state: isReady ? 'READY' : 'NOT READY',
+          ready: isReady,
+          status: r.status || 'healthy',
+          timestampReady: r.timestamp_ready ?? null,
+          error: null
+        });
+        newLogs.push({
+          id: Date.now() + 2,
+          time: new Date().toISOString().substring(11, 23) + 'Z',
+          component: 'PLATFORM_READINESS',
+          level: isReady ? 'INFO' : 'WARN',
+          msg: `Readiness verified: ${isReady ? 'READY' : 'NOT READY'}`
+        });
+      } else {
+        const err = readinessRes.reason?.message || 'Readiness probe unreachable';
+        setReadinessData(prev => ({ ...prev, state: 'UNKNOWN', ready: null, error: err }));
+        newLogs.push({
+          id: Date.now() + 2,
+          time: new Date().toISOString().substring(11, 23) + 'Z',
+          component: 'PLATFORM_READINESS',
+          level: 'WARN',
+          msg: `Readiness state indeterminate: ${err}`
+        });
+      }
+
+      // Process GET /platform/info
+      if (infoRes.status === 'fulfilled' && infoRes.value) {
+        const inf = infoRes.value;
+        setPlatformInfo({
+          service: inf.service || 'CodeSentinel',
+          version: inf.version || '1.0.0',
+          apiVersion: inf.api_version || 'v1',
+          capabilities: Array.isArray(inf.enabled_capabilities) ? inf.enabled_capabilities : [],
+          supportedModes: Array.isArray(inf.supported_analysis_modes) ? inf.supported_analysis_modes : [],
+          supportedLanguages: Array.isArray(inf.supported_languages) ? inf.supported_languages : [],
+          gateOutcomes: Array.isArray(inf.security_gate_outcomes) ? inf.security_gate_outcomes : [],
+          error: null
+        });
+      } else {
+        setPlatformInfo(prev => ({
+          ...prev,
+          error: infoRes.reason?.message || 'Metadata endpoint unavailable'
+        }));
+      }
+
+      // Process GET /platform/policies
+      if (policiesRes.status === 'fulfilled' && Array.isArray(policiesRes.value)) {
+        setPolicies(policiesRes.value);
+        setPoliciesError(null);
+      } else {
+        setPoliciesError(policiesRes.reason?.message || 'Security policies unavailable');
+      }
+
+      // Process GET /platform/metrics
+      if (metricsRes.status === 'fulfilled' && metricsRes.value) {
+        const m = metricsRes.value;
+        setMetrics({
+          requestsTotal: m.analysis_requests_total ?? 0,
+          requestsSuccess: m.analysis_success_total ?? 0,
+          requestsFailed: m.analysis_failed_total ?? 0,
+          decisionsAllow: m.decisions_allow_total ?? 0,
+          decisionsBlock: m.decisions_block_total ?? 0,
+          decisionsReview: m.decisions_review_total ?? 0,
+          cacheHits: m.cache_hits_total ?? 0,
+          cacheMisses: m.cache_misses_total ?? 0,
+          healthChecksTotal: m.health_checks_total ?? 0,
+          lastDurationMs: m.last_analysis_duration_ms ?? 0,
+          isAvailable: true,
+          error: null
+        });
+      } else {
+        setMetrics(prev => ({
+          ...prev,
+          isAvailable: false,
+          error: metricsRes.reason?.message || 'Metrics telemetry unavailable'
+        }));
+      }
+
+      // Append new event logs
+      if (newLogs.length > 0) {
+        setEventLogs(prev => [...newLogs, ...prev].slice(0, 10));
+      }
+
+      setLastChecked(nowTime);
     } catch {
-      // Graceful fallback to presentation data
-      setHealthStatus((prev) => ({
-        ...prev,
-        last_check: new Date().toLocaleTimeString()
-      }));
+      setLastChecked(nowTime);
     } finally {
-      setTimeout(() => setIsRefreshing(false), 400);
+      setTimeout(() => setIsRefreshing(false), 300);
     }
   };
 
   useEffect(() => {
     handleRefreshHealth();
   }, []);
+
+  // Format checks map into displayable component items
+  const checkComponents = healthData.checks
+    ? Object.entries(healthData.checks).map(([key, check]) => {
+        const isHealthy = check.status === 'healthy';
+        const formattedName = key.replace(/_/g, ' ').toUpperCase();
+        return {
+          id: key,
+          name: formattedName,
+          status: isHealthy ? 'green' : 'amber',
+          detail: check.details || 'Status evaluated by backend health check',
+          response: isHealthy ? 'OPERATIONAL' : (check.status?.toUpperCase() || 'DEGRADED')
+        };
+      })
+    : [
+        { id: 'config', name: 'CONFIGURATION', status: 'dim', detail: 'Awaiting backend diagnostics...', response: 'PENDING' },
+        { id: 'sec_ctrl', name: 'SECURITY CONTROLS', status: 'dim', detail: 'Awaiting backend diagnostics...', response: 'PENDING' },
+        { id: 'vector', name: 'VECTOR STORE', status: 'dim', detail: 'Awaiting backend diagnostics...', response: 'PENDING' },
+        { id: 'llm', name: 'LLM SERVICE', status: 'dim', detail: 'Awaiting backend diagnostics...', response: 'PENDING' },
+        { id: 'gate', name: 'SECURITY GATE', status: 'dim', detail: 'Awaiting backend diagnostics...', response: 'PENDING' }
+      ];
+
+  const isHealthy = healthData.status === 'healthy';
+  const readinessColor = readinessData.state === 'READY' ? 'var(--status-green)' : readinessData.state === 'NOT READY' ? 'var(--critical-red)' : 'var(--secondary-amber)';
+  const readinessPip = readinessData.state === 'READY' ? 'green' : readinessData.state === 'NOT READY' ? 'red' : 'amber';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '1400px', margin: '0 auto', width: '100%' }}>
@@ -78,16 +264,16 @@ export default function SystemHealthPage() {
               <LabelCaps style={{ fontSize: '11px', color: 'var(--primary-cyan)' }}>
                 SYSTEM HEALTH &amp; INFRASTRUCTURE DIAGNOSTICS
               </LabelCaps>
-              <StatusPip status="green" title="System Operational" />
+              <StatusPip status={isHealthy ? 'green' : 'amber'} title={`Health: ${healthData.status}`} />
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--status-green)' }}>
-                {healthStatus.version}
+                v{healthData.version}
               </span>
             </div>
             <h1 style={{ margin: 0, fontSize: '22px', fontWeight: 700, color: 'var(--text-on-surface)' }}>
-              System Health &amp; Infrastructure
+              System Health &amp; Telemetry
             </h1>
             <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: 'var(--text-on-surface-variant)' }}>
-              Monitor CodeSentinel core backend services, storage telemetry, AI model pipelines, and operational health events.
+              Real-time platform readiness, core subsystem health checks, and runtime telemetry provided by the CodeSentinel backend.
             </p>
           </div>
 
@@ -102,57 +288,81 @@ export default function SystemHealthPage() {
         </div>
       </DataPanel>
 
-      {/* 2. Overall System Status Banner */}
+      {/* 2. Overall System Health & Readiness Status Banner */}
       <div style={{
         padding: '16px 20px',
-        backgroundColor: 'rgba(52, 199, 89, 0.1)',
-        border: '1px solid var(--status-green)',
+        backgroundColor: isHealthy ? 'rgba(52, 199, 89, 0.08)' : 'rgba(254, 183, 0, 0.08)',
+        border: `1px solid ${isHealthy ? 'var(--status-green)' : 'var(--secondary-amber)'}`,
         borderRadius: 'var(--radius-xs)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
+        flexWrap: 'wrap',
+        gap: '12px',
         fontFamily: 'var(--font-mono)',
         fontSize: '13px',
         fontWeight: 700,
-        color: 'var(--status-green)'
+        color: isHealthy ? 'var(--status-green)' : 'var(--secondary-amber)'
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <StatusPip status="green" />
-          <span>SYSTEM HEALTH STATUS: OPTIMAL (ONLINE 200 OK)</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <StatusPip status={isHealthy ? 'green' : 'amber'} />
+            <span>PLATFORM HEALTH: {healthData.status.toUpperCase()} ({healthData.environment?.toUpperCase() || 'DEVELOPMENT'})</span>
+          </div>
+
+          <div style={{ borderLeft: '1px solid var(--border-subtle)', height: '18px' }} />
+
+          {/* Explicit Readiness state (Step 4) */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <StatusPip status={readinessPip} />
+            <span style={{ color: readinessColor }}>
+              READINESS: {readinessData.state}
+            </span>
+          </div>
         </div>
-        <div style={{ fontSize: '11px', opacity: 0.85, textTransform: 'none' }}>
-          Last Checked: {healthStatus.last_check} | Uptime: {healthStatus.uptime}
+
+        <div style={{ fontSize: '11px', opacity: 0.85, textTransform: 'none', color: 'var(--text-dim)' }}>
+          Last Checked: {lastChecked} | Service: {healthData.service}
         </div>
       </div>
 
-      {/* 3. Service Health Grid */}
-      <DataPanel title="CORE BACKEND SERVICES STATUS" status="green">
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
-          {services.map((svc) => (
+      {/* 3. Core Component Health Grid (Real components reported by /platform/health) */}
+      <DataPanel title="CORE SUBSYSTEM HEALTH CHECKS" status={isHealthy ? 'green' : 'amber'}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '12px' }}>
+          {checkComponents.map((svc) => (
             <div
-              key={svc.name}
+              key={svc.id}
               style={{
-                padding: '12px 16px',
+                padding: '14px 16px',
                 backgroundColor: 'var(--bg-void-lowest)',
                 border: '1px solid var(--border-subtle)',
                 borderRadius: 'var(--radius-xs)',
                 display: 'flex',
                 flexDirection: 'column',
-                gap: '6px'
+                gap: '8px'
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <StatusPip status={svc.status} />
                   <LabelCaps style={{ fontSize: '11px', color: 'var(--text-on-surface)' }}>
                     {svc.name}
                   </LabelCaps>
                 </div>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--primary-cyan)' }}>
+                <span style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: '10px',
+                  fontWeight: 700,
+                  padding: '2px 6px',
+                  borderRadius: 'var(--radius-xs)',
+                  backgroundColor: svc.status === 'green' ? 'rgba(52, 199, 89, 0.1)' : 'rgba(254, 183, 0, 0.1)',
+                  color: svc.status === 'green' ? 'var(--status-green)' : 'var(--secondary-amber)',
+                  border: `1px solid ${svc.status === 'green' ? 'var(--status-green)' : 'var(--secondary-amber)'}`
+                }}>
                   {svc.response}
                 </span>
               </div>
-              <p style={{ margin: 0, fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-dim)' }}>
+              <p style={{ margin: 0, fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-dim)', lineHeight: 1.4 }}>
                 {svc.detail}
               </p>
             </div>
@@ -160,37 +370,157 @@ export default function SystemHealthPage() {
         </div>
       </DataPanel>
 
-      {/* 4. Infrastructure Telemetry Bento Grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
+      {/* 4. Real Telemetry Bento Grid (Real backend metrics from /platform/metrics) */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '16px' }}>
         <MetricCard
-          label="CPU UTILIZATION"
-          value="14.2%"
-          delta="4 CORES ACTIVE"
-          accentColor="green"
-        />
-        <MetricCard
-          label="MEMORY CONSUMPTION"
-          value="1.8 GB"
-          delta="ALLOCATED OF 8.0 GB"
+          label="ANALYSIS REQUESTS"
+          value={metrics.isAvailable ? String(metrics.requestsTotal) : 'UNAVAILABLE'}
+          delta={metrics.isAvailable ? `${metrics.requestsSuccess} SUCCEEDED · ${metrics.requestsFailed} FAILED` : 'Telemetry offline'}
           accentColor="cyan"
         />
         <MetricCard
-          label="STORAGE OCCUPANCY"
-          value="420 MB"
-          delta="SQLITE &amp; CHROMADB"
+          label="SECURITY GATE VERDICTS"
+          value={metrics.isAvailable ? `${metrics.decisionsAllow} ALLOW` : 'UNAVAILABLE'}
+          delta={metrics.isAvailable ? `${metrics.decisionsBlock} BLOCK · ${metrics.decisionsReview} REVIEW` : 'Backend gate stats'}
+          accentColor="green"
+        />
+        <MetricCard
+          label="ANALYSIS CACHE"
+          value={metrics.isAvailable ? `${metrics.cacheHits} HITS` : 'UNAVAILABLE'}
+          delta={metrics.isAvailable ? `${metrics.cacheMisses} MISSES RECORDED` : 'Deterministic cache'}
           accentColor="dim"
         />
         <MetricCard
-          label="AVERAGE API LATENCY"
-          value="12 ms"
-          delta="SUB-50ms TARGET MET"
+          label="LAST ANALYSIS DURATION"
+          value={metrics.isAvailable ? `${metrics.lastDurationMs} ms` : '0 ms'}
+          delta={metrics.isAvailable ? `${metrics.healthChecksTotal} Health Checks Counted` : 'Telemetry offline'}
           accentColor="green"
         />
       </div>
 
-      {/* 5. Analysis Pipeline Operational Stages */}
-      <DataPanel title="DEVSECOPS ANALYSIS PIPELINE OPERATIONAL STATUS" status="cyan">
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '12px' }}>
+      {/* 5. Platform Capabilities & Runtime Metadata Panel (from /platform/info) */}
+      <DataPanel title="PLATFORM RUNTIME CAPABILITIES &amp; METADATA" status="cyan">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px' }}>
+            <div style={{ padding: '10px 14px', backgroundColor: 'var(--bg-void-lowest)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-xs)' }}>
+              <LabelCaps style={{ fontSize: '10px', color: 'var(--text-dim)' }}>SERVICE NAME</LabelCaps>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', fontWeight: 600, color: 'var(--primary-cyan)', marginTop: '4px' }}>
+                {platformInfo.service}
+              </div>
+            </div>
+
+            <div style={{ padding: '10px 14px', backgroundColor: 'var(--bg-void-lowest)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-xs)' }}>
+              <LabelCaps style={{ fontSize: '10px', color: 'var(--text-dim)' }}>API VERSION</LabelCaps>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', fontWeight: 600, color: 'var(--status-green)', marginTop: '4px' }}>
+                {platformInfo.apiVersion.toUpperCase()} (v{platformInfo.version})
+              </div>
+            </div>
+
+            <div style={{ padding: '10px 14px', backgroundColor: 'var(--bg-void-lowest)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-xs)' }}>
+              <LabelCaps style={{ fontSize: '10px', color: 'var(--text-dim)' }}>SUPPORTED MODES</LabelCaps>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text-on-surface)', marginTop: '4px' }}>
+                {platformInfo.supportedModes.length > 0 ? platformInfo.supportedModes.join(', ').toUpperCase() : 'FULL, INCREMENTAL'}
+              </div>
+            </div>
+
+            <div style={{ padding: '10px 14px', backgroundColor: 'var(--bg-void-lowest)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-xs)' }}>
+              <LabelCaps style={{ fontSize: '10px', color: 'var(--text-dim)' }}>SUPPORTED LANGUAGES</LabelCaps>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text-on-surface)', marginTop: '4px' }}>
+                {platformInfo.supportedLanguages.length > 0 ? platformInfo.supportedLanguages.join(', ').toUpperCase() : 'PYTHON'}
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <LabelCaps style={{ fontSize: '10px', color: 'var(--text-dim)', marginBottom: '8px', display: 'block' }}>
+              ACTIVE PIPELINE CAPABILITIES (REPORTED BY BACKEND)
+            </LabelCaps>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+              {platformInfo.capabilities.length > 0 ? (
+                platformInfo.capabilities.map((cap) => (
+                  <span
+                    key={cap}
+                    style={{
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: '11px',
+                      padding: '4px 10px',
+                      borderRadius: 'var(--radius-xs)',
+                      backgroundColor: 'rgba(0, 240, 255, 0.08)',
+                      border: '1px solid var(--primary-cyan)',
+                      color: 'var(--primary-cyan)'
+                    }}
+                  >
+                    ✓ {cap.toUpperCase()}
+                  </span>
+                ))
+              ) : (
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-dim)' }}>
+                  Loading capabilities from platform...
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </DataPanel>
+
+      {/* 6. Platform Security Policy Profiles (from /platform/policies) */}
+      <DataPanel title="SECURITY POLICY PROFILES (READ-ONLY ENFORCEMENT CONFIGURATION)" status="green">
+        {policiesError ? (
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--secondary-amber)' }}>
+            Policy configuration unavailable: {policiesError}
+          </div>
+        ) : policies.length > 0 ? (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '12px' }}>
+            {policies.map((p) => (
+              <div
+                key={p.name}
+                style={{
+                  padding: '12px 14px',
+                  backgroundColor: 'var(--bg-void-lowest)',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: 'var(--radius-xs)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '6px'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', fontWeight: 700, color: 'var(--text-on-surface)' }}>
+                    PROFILE: {p.name.toUpperCase()}
+                  </span>
+                  <span style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: '10px',
+                    fontWeight: 700,
+                    padding: '2px 6px',
+                    borderRadius: 'var(--radius-xs)',
+                    backgroundColor: 'rgba(0, 240, 255, 0.1)',
+                    color: 'var(--primary-cyan)',
+                    border: '1px solid var(--primary-cyan)'
+                  }}>
+                    {p.severity_threshold}
+                  </span>
+                </div>
+                <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-dim)', lineHeight: 1.4 }}>
+                  <div>Max Files: {p.max_files}</div>
+                  <div>Review Action: {p.review_action} | Block Action: {p.block_action}</div>
+                  <div style={{ color: p.block_on_critical ? 'var(--critical-red)' : 'var(--text-dim)' }}>
+                    Block on Critical: {p.block_on_critical ? 'ENABLED' : 'DISABLED'}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text-dim)' }}>
+            Awaiting policy profile configurations from backend...
+          </div>
+        )}
+      </DataPanel>
+
+      {/* 7. DevSecOps Analysis Pipeline Operational Stages */}
+      <DataPanel title="DEVSECOPS ANALYSIS PIPELINE OPERATIONAL STAGES" status="cyan">
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' }}>
           
           <div style={{ padding: '10px', backgroundColor: 'var(--bg-void-lowest)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-xs)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--status-green)' }}>
@@ -205,7 +535,7 @@ export default function SystemHealthPage() {
               <StatusPip status="green" />
               <LabelCaps style={{ fontSize: '9px' }}>2. ACQUISITION</LabelCaps>
             </div>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-dim)' }}>Workspace Iso</span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-dim)' }}>Workspace Isolation</span>
           </div>
 
           <div style={{ padding: '10px', backgroundColor: 'var(--bg-void-lowest)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-xs)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
@@ -213,13 +543,13 @@ export default function SystemHealthPage() {
               <StatusPip status="green" />
               <LabelCaps style={{ fontSize: '9px' }}>3. AST ENGINE</LabelCaps>
             </div>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-dim)' }}>Python Parser</span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-dim)' }}>Python AST Parser</span>
           </div>
 
           <div style={{ padding: '10px', backgroundColor: 'var(--bg-void-lowest)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-xs)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--primary-cyan)' }}>
               <StatusPip status="cyan" />
-              <LabelCaps style={{ fontSize: '9px' }}>4. RAG GROUND</LabelCaps>
+              <LabelCaps style={{ fontSize: '9px' }}>4. RAG GROUNDING</LabelCaps>
             </div>
             <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-dim)' }}>ChromaDB Retrieval</span>
           </div>
@@ -229,7 +559,7 @@ export default function SystemHealthPage() {
               <StatusPip status="cyan" />
               <LabelCaps style={{ fontSize: '9px' }}>5. AI REASONING</LabelCaps>
             </div>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-dim)' }}>Mock Provider</span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-dim)' }}>Provider Pipeline</span>
           </div>
 
           <div style={{ padding: '10px', backgroundColor: 'var(--bg-void-lowest)', border: '1px solid var(--status-green)', borderRadius: 'var(--radius-xs)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
@@ -243,13 +573,13 @@ export default function SystemHealthPage() {
         </div>
       </DataPanel>
 
-      {/* 6. System Operational Events Log Table */}
+      {/* 8. System Operational Events Log Table */}
       <DataPanel title="SYSTEM OPERATIONAL EVENTS LOG" status="green">
         <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-xs)', overflow: 'hidden' }}>
           {/* Header */}
           <div style={{
             display: 'grid',
-            gridTemplateColumns: '150px 140px 90px 1fr',
+            gridTemplateColumns: '150px 180px 90px 1fr',
             gap: '12px',
             padding: '8px 16px',
             backgroundColor: 'var(--bg-void-low)',
@@ -266,12 +596,12 @@ export default function SystemHealthPage() {
           </div>
 
           {/* Log Rows */}
-          {systemLogs.map((log) => (
+          {eventLogs.map((log) => (
             <div
               key={log.id}
               style={{
                 display: 'grid',
-                gridTemplateColumns: '150px 140px 90px 1fr',
+                gridTemplateColumns: '150px 180px 90px 1fr',
                 gap: '12px',
                 padding: '10px 16px',
                 borderBottom: '1px solid var(--border-subtle)',
@@ -288,9 +618,9 @@ export default function SystemHealthPage() {
                   fontWeight: 700,
                   padding: '2px 6px',
                   borderRadius: 'var(--radius-xs)',
-                  backgroundColor: 'rgba(52, 199, 89, 0.1)',
-                  color: 'var(--status-green)',
-                  border: '1px solid var(--status-green)'
+                  backgroundColor: log.level === 'INFO' ? 'rgba(52, 199, 89, 0.1)' : log.level === 'WARN' ? 'rgba(254, 183, 0, 0.1)' : 'rgba(255, 59, 48, 0.1)',
+                  color: log.level === 'INFO' ? 'var(--status-green)' : log.level === 'WARN' ? 'var(--secondary-amber)' : 'var(--critical-red)',
+                  border: `1px solid ${log.level === 'INFO' ? 'var(--status-green)' : log.level === 'WARN' ? 'var(--secondary-amber)' : 'var(--critical-red)'}`
                 }}>
                   {log.level}
                 </span>

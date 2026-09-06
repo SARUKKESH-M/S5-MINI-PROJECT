@@ -5,22 +5,42 @@ Formats and posts/updates deterministic Markdown security analysis comments on G
 Prevents duplicate comments by identifying the stable marker `<!-- codesentinel-security-analysis -->`.
 """
 
-from typing import Any, Dict, Optional
+import hashlib
+import re
+from typing import Any, Dict, List, Optional, Set
 
 try:
     from backend.github.client import GitHubClient
     from backend.github.validator import (
         validate_webhook_owner,
         validate_webhook_repo,
-        validate_pr_number
+        validate_pr_number,
+        validate_commit_sha
     )
+    from backend.github.exceptions import (
+        GitHubAPIError,
+        GitHubAuthenticationError,
+        GitHubPermissionError,
+        GitHubNotFoundError,
+        GitHubRateLimitError
+    )
+    from backend.analysis.diff_scope import parse_unified_diff
 except ImportError:
     from github.client import GitHubClient
     from github.validator import (
         validate_webhook_owner,
         validate_webhook_repo,
-        validate_pr_number
+        validate_pr_number,
+        validate_commit_sha
     )
+    from github.exceptions import (
+        GitHubAPIError,
+        GitHubAuthenticationError,
+        GitHubPermissionError,
+        GitHubNotFoundError,
+        GitHubRateLimitError
+    )
+    from analysis.diff_scope import parse_unified_diff
 
 
 COMMENT_MARKER = "<!-- codesentinel-security-analysis -->"
@@ -161,3 +181,402 @@ def post_pr_security_comment(
     else:
         post_endpoint = f"/repos/{clean_owner}/{clean_repo}/issues/{clean_pr_num}/comments"
         return api_client.request("POST", post_endpoint, json_data={"body": comment_body})
+
+
+# =============================================================================
+# INLINE GITHUB PR REVIEW COMMENTS
+# =============================================================================
+
+INLINE_COMMENT_MARKER_PREFIX = "<!-- codesentinel-inline-finding:"
+INLINE_COMMENT_MARKER_SUFFIX = " -->"
+
+SEVERITY_BADGES = {
+    "critical": "🔴 **[CRITICAL]**",
+    "high": "🟠 **[HIGH]**",
+    "medium": "🟡 **[MEDIUM]**",
+    "low": "🔵 **[LOW]**",
+    "info": "⚪ **[INFO]**"
+}
+
+
+def _scrub_sensitive_text(text: str) -> str:
+    """Removes tokens, passwords, or internal paths from comment text to prevent leakage."""
+    if not text or not isinstance(text, str):
+        return ""
+    # Mask common credential patterns (ghp_, github_pat_, Bearer, secret keys)
+    scrubbed = re.sub(
+        r"(ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|Bearer\s+[A-Za-z0-9\-_.]+)",
+        "[REDACTED_CREDENTIAL]",
+        text
+    )
+    scrubbed = re.sub(
+        r"(sk-[A-Za-z0-9]{20,}|(?:secret|password|api_key|token)\s*[:=]\s*['\"][^'\"]+['\"])",
+        "[REDACTED_CREDENTIAL]",
+        scrubbed,
+        flags=re.IGNORECASE
+    )
+    # Mask local user home directories (e.g. C:\Users\admin\... or /home/runner/...)
+    scrubbed = re.sub(r"[A-Za-z]:\\[Uu]sers\\[^\\]+\\", "workspace/", scrubbed)
+    scrubbed = re.sub(r"/home/[^/]+/", "workspace/", scrubbed)
+    return scrubbed
+
+
+def generate_inline_finding_fingerprint(
+    file_path: str,
+    line: int,
+    finding: Dict[str, Any]
+) -> str:
+    """
+    Generates a deterministic 16-hex fingerprint for an inline finding on a specific file and line.
+    """
+    norm_path = file_path.replace("\\", "/").strip().lstrip("./")
+    finding_id = str(finding.get("finding_id") or "")
+    title = str(finding.get("title") or "")
+    category = str(finding.get("category") or "")
+    cwe = str(finding.get("cwe") or finding.get("cwe_id") or "")
+
+    raw = f"{norm_path}:{line}:{finding_id}:{title}:{category}:{cwe}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def format_inline_finding_comment(
+    finding: Dict[str, Any],
+    fingerprint: str
+) -> str:
+    """
+    Formats a concise, developer-friendly Markdown inline PR review comment for a deterministic finding.
+    Ensures stable marker inclusion and zero secret leakage.
+    """
+    if not isinstance(finding, dict):
+        raise ValueError("Finding must be a dictionary")
+
+    marker = f"{INLINE_COMMENT_MARKER_PREFIX}{fingerprint}{INLINE_COMMENT_MARKER_SUFFIX}"
+    sev_raw = str(finding.get("severity") or "medium").strip().lower()
+    badge = SEVERITY_BADGES.get(sev_raw, "🟡 **[MEDIUM]**")
+
+    cwe_id = finding.get("cwe") or finding.get("cwe_id")
+    cwe_label = f"`{cwe_id}` — " if cwe_id else ""
+
+    title = _scrub_sensitive_text(str(finding.get("title") or "Security Finding").strip())
+    desc = _scrub_sensitive_text(str(finding.get("description") or "Security vulnerability detected on this modified line.").strip())
+
+    remediation = finding.get("remediation") or finding.get("suggestion")
+    if not remediation:
+        remediation = "Remediate this finding or implement appropriate input validation/sanitization."
+    remediation_text = _scrub_sensitive_text(str(remediation).strip())
+
+    comment = (
+        f"{marker}\n"
+        f"### {badge} {cwe_label}{title}\n\n"
+        f"**Issue:** {desc}\n\n"
+        f"**Remediation:** {remediation_text}\n\n"
+        f"---\n"
+        f"*CodeSentinel Automated DevSecOps Gate*"
+    )
+    return comment
+
+
+def _normalize_repo_relative_path(path: str) -> str:
+    """Normalizes relative file path for cross-platform comparison."""
+    if not path or not isinstance(path, str):
+        return ""
+    clean = path.strip().replace("\\", "/").lstrip("./")
+    while "//" in clean:
+        clean = clean.replace("//", "/")
+    return clean
+
+
+def extract_inline_commentable_findings(
+    report: Dict[str, Any],
+    changed_files: List[Any]
+) -> List[Dict[str, Any]]:
+    """
+    Extracts findings from a Step 6O report that map confidently to added/modified lines in the PR diff.
+    Findings outside diff hunks, on unmappable lines, or in unchanged files are strictly omitted.
+
+    Args:
+        report: Step 6O Production Report dictionary containing findings.
+        changed_files: List of GitHubChangedFile objects or dicts from PR snapshot.
+
+    Returns:
+        List of dictionaries with keys: 'path', 'line', 'side', 'finding', 'fingerprint'.
+    """
+    if not isinstance(report, dict) or not changed_files:
+        return []
+
+    # 1. Build map of changed files -> set of added/modified lines in new file (side RIGHT)
+    changed_file_diff_map: Dict[str, Set[int]] = {}
+
+    for f_item in changed_files:
+        fname = getattr(f_item, "filename", None) or (f_item.get("filename") if isinstance(f_item, dict) else "")
+        patch = getattr(f_item, "patch", None) or (f_item.get("patch") if isinstance(f_item, dict) else None)
+        status = getattr(f_item, "status", None) or (f_item.get("status") if isinstance(f_item, dict) else "")
+
+        if not fname or status == "removed" or not patch:
+            continue
+
+        norm_name = _normalize_repo_relative_path(fname)
+        try:
+            diff_info = parse_unified_diff(patch)
+            if diff_info and diff_info.added_lines:
+                changed_file_diff_map[norm_name] = set(diff_info.added_lines)
+        except Exception:
+            continue
+
+    if not changed_file_diff_map:
+        return []
+
+    # 2. Iterate through report findings and map to modified diff lines
+    findings = report.get("findings", [])
+    if not isinstance(findings, list):
+        return []
+
+    commentable: List[Dict[str, Any]] = []
+
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+
+        # Extract file path
+        f_path = finding.get("file_path") or finding.get("file")
+        if not f_path:
+            ev_list = finding.get("evidence", [])
+            if isinstance(ev_list, list) and ev_list and isinstance(ev_list[0], dict):
+                f_path = ev_list[0].get("document_id")
+
+        if not f_path or not isinstance(f_path, str):
+            continue
+
+        norm_f_path = _normalize_repo_relative_path(f_path)
+
+        # Match to a changed file in PR
+        matched_target_path = None
+        matched_diff_lines = None
+
+        if norm_f_path in changed_file_diff_map:
+            matched_target_path = norm_f_path
+            matched_diff_lines = changed_file_diff_map[norm_f_path]
+        else:
+            for cf_name, diff_lines in changed_file_diff_map.items():
+                if norm_f_path.endswith(cf_name) or cf_name.endswith(norm_f_path):
+                    matched_target_path = cf_name
+                    matched_diff_lines = diff_lines
+                    break
+
+        if not matched_target_path or matched_diff_lines is None:
+            # Finding is in an unchanged file or file without patch -> skip inline comment
+            continue
+
+        # Extract line number
+        f_line = finding.get("line_number")
+        if f_line is None:
+            f_line = finding.get("line")
+        if f_line is None:
+            ev_list = finding.get("evidence", [])
+            if isinstance(ev_list, list) and ev_list and isinstance(ev_list[0], dict):
+                f_line = ev_list[0].get("line_start")
+
+        if f_line is None:
+            continue
+
+        try:
+            line_num = int(f_line)
+        except (ValueError, TypeError):
+            continue
+
+        if line_num <= 0:
+            continue
+
+        # Strict check: finding line MUST be in added/modified diff lines of the PR!
+        if line_num not in matched_diff_lines:
+            # Line is outside the PR diff hunk -> do NOT create inline comment
+            continue
+
+        fp = generate_inline_finding_fingerprint(matched_target_path, line_num, finding)
+        commentable.append({
+            "path": matched_target_path,
+            "line": line_num,
+            "side": "RIGHT",
+            "finding": finding,
+            "fingerprint": fp
+        })
+
+    return commentable
+
+
+def get_existing_inline_comment_fingerprints(
+    owner: str,
+    repository: str,
+    pr_number: int,
+    client: Optional[GitHubClient] = None
+) -> Set[str]:
+    """
+    Fetches existing PR review comments and extracts published CodeSentinel finding fingerprints.
+    Prevents duplicate inline comments on repeated webhook delivery.
+    """
+    clean_owner = validate_webhook_owner(owner)
+    clean_repo = validate_webhook_repo(repository)
+    clean_pr_num = validate_pr_number(pr_number)
+
+    api_client = client or GitHubClient()
+    existing_fps: Set[str] = set()
+
+    try:
+        endpoint = f"/repos/{clean_owner}/{clean_repo}/pulls/{clean_pr_num}/comments"
+        comments_res = api_client.get(endpoint)
+        if isinstance(comments_res, list):
+            for comment in comments_res:
+                if isinstance(comment, dict):
+                    body = str(comment.get("body") or "")
+                    if INLINE_COMMENT_MARKER_PREFIX in body:
+                        parts = body.split(INLINE_COMMENT_MARKER_PREFIX)
+                        for part in parts[1:]:
+                            if INLINE_COMMENT_MARKER_SUFFIX in part:
+                                fp = part.split(INLINE_COMMENT_MARKER_SUFFIX)[0].strip()
+                                if fp:
+                                    existing_fps.add(fp)
+    except Exception:
+        # Non-blocking: if comment inspection fails, return empty set safely
+        pass
+
+    return existing_fps
+
+
+def post_pr_inline_review_comments(
+    owner: str,
+    repository: str,
+    pr_number: int,
+    head_sha: str,
+    report: Dict[str, Any],
+    changed_files: List[Any],
+    client: Optional[GitHubClient] = None
+) -> Dict[str, Any]:
+    """
+    Publishes inline Pull Request review comments on modified code lines for valid findings.
+    Enforces idempotency, diff-line bounds checking, and non-blocking error handling.
+    """
+    clean_owner = validate_webhook_owner(owner)
+    clean_repo = validate_webhook_repo(repository)
+    clean_pr_num = validate_pr_number(pr_number)
+    clean_head_sha = validate_commit_sha(head_sha)
+
+    api_client = client or GitHubClient()
+
+    # 1. Extract findings that map confidently to changed diff lines
+    candidate_comments = extract_inline_commentable_findings(report, changed_files)
+    if not candidate_comments:
+        return {
+            "status": "skipped",
+            "reason": "no_diff_scoped_findings",
+            "comments_count": 0,
+            "posted_findings": []
+        }
+
+    # 2. Query existing comments to prevent duplicates
+    existing_fps = get_existing_inline_comment_fingerprints(
+        owner=clean_owner,
+        repository=clean_repo,
+        pr_number=clean_pr_num,
+        client=api_client
+    )
+
+    to_post = [c for c in candidate_comments if c["fingerprint"] not in existing_fps]
+    if not to_post:
+        return {
+            "status": "skipped",
+            "reason": "already_commented",
+            "comments_count": 0,
+            "posted_findings": []
+        }
+
+    # Deduplicate within to_post itself if multiple identical findings on same line
+    unique_to_post: List[Dict[str, Any]] = []
+    seen_fps: Set[str] = set()
+    for c in to_post:
+        if c["fingerprint"] not in seen_fps:
+            seen_fps.add(c["fingerprint"])
+            unique_to_post.append(c)
+
+    # 3. Format review comments payload
+    comments_payload = []
+    for item in unique_to_post:
+        comments_payload.append({
+            "path": item["path"],
+            "line": item["line"],
+            "side": item["side"],
+            "body": format_inline_finding_comment(item["finding"], item["fingerprint"])
+        })
+
+    # 4. Attempt batch review submission via Pull Request Reviews API
+    review_endpoint = f"/repos/{clean_owner}/{clean_repo}/pulls/{clean_pr_num}/reviews"
+    review_body = (
+        "## CodeSentinel Security Audit — Inline Review Findings\n\n"
+        "Security findings were identified on lines modified in this pull request. "
+        "Please review the inline recommendations below."
+    )
+    batch_payload = {
+        "commit_id": clean_head_sha,
+        "event": "COMMENT",
+        "body": review_body,
+        "comments": comments_payload
+    }
+
+    try:
+        res = api_client.request("POST", review_endpoint, json_data=batch_payload)
+        review_id = res.get("id") if isinstance(res, dict) else None
+        return {
+            "status": "success",
+            "method": "batch_review",
+            "comments_count": len(comments_payload),
+            "review_id": review_id,
+            "posted_findings": [c["fingerprint"] for c in unique_to_post]
+        }
+    except GitHubAPIError as api_err:
+        # If batch review fails with 422 (e.g. line outside diff in GitHub's view),
+        # attempt individual comment posting so valid lines still receive comments
+        if api_err.status_code == 422:
+            posted_count = 0
+            posted_fps = []
+            individual_endpoint = f"/repos/{clean_owner}/{clean_repo}/pulls/{clean_pr_num}/comments"
+            for item in unique_to_post:
+                indiv_payload = {
+                    "commit_id": clean_head_sha,
+                    "path": item["path"],
+                    "line": item["line"],
+                    "side": item["side"],
+                    "body": format_inline_finding_comment(item["finding"], item["fingerprint"])
+                }
+                try:
+                    api_client.request("POST", individual_endpoint, json_data=indiv_payload)
+                    posted_count += 1
+                    posted_fps.append(item["fingerprint"])
+                except Exception:
+                    continue
+            return {
+                "status": "partial_success" if posted_count > 0 else "skipped",
+                "method": "individual_fallback",
+                "comments_count": posted_count,
+                "posted_findings": posted_fps,
+                "reason": "batch_422_individual_fallback"
+            }
+        else:
+            return {
+                "status": "skipped",
+                "reason": f"github_api_error_{api_err.status_code}",
+                "comments_count": 0,
+                "posted_findings": []
+            }
+    except (GitHubAuthenticationError, GitHubPermissionError, GitHubNotFoundError, GitHubRateLimitError) as gh_err:
+        return {
+            "status": "skipped",
+            "reason": type(gh_err).__name__,
+            "comments_count": 0,
+            "posted_findings": []
+        }
+    except Exception as exc:
+        return {
+            "status": "skipped",
+            "reason": f"unexpected_transport_error_{type(exc).__name__}",
+            "comments_count": 0,
+            "posted_findings": []
+        }

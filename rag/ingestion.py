@@ -182,3 +182,42 @@ def ingest_security_knowledge(
         "collection_name": target_coll_name,
     }
 
+
+def ensure_curated_knowledge_ingested(
+    db_path: Optional[str] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Ensure that the 12 curated OWASP/CWE knowledge documents are ingested into ChromaDB.
+
+    Checks the dedicated security knowledge collection. If the curated catalog is already present
+    and force is False, returns existing status without redundant disk writes.
+    If missing or force is True, ingests CURATED_OWASP_KNOWLEDGE deterministically and idempotently.
+
+    Parameters:
+      db_path: Optional database storage path override.
+      force: If True, re-upserts all documents regardless of current collection state.
+
+    Returns:
+      Dict with status, ingested_count, and collection_name.
+    """
+    from knowledge.curated_owasp import CURATED_OWASP_KNOWLEDGE
+
+    collection = get_security_knowledge_collection(db_path=db_path)
+    canonical_sample_chunk_id = "knowledge_cwe_89_sql_injection_chunk_1"
+
+    if not force and collection.count() > 0:
+        try:
+            existing = collection.get(ids=[canonical_sample_chunk_id])
+            if existing and existing.get("ids"):
+                return {
+                    "status": "success",
+                    "ingested_count": 0,
+                    "collection_name": SECURITY_KNOWLEDGE_COLLECTION_NAME,
+                    "already_present": True,
+                }
+        except Exception:
+            pass
+
+    return ingest_security_knowledge(CURATED_OWASP_KNOWLEDGE, db_path=db_path)
+
+

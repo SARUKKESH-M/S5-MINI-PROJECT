@@ -7,6 +7,7 @@ security knowledge separately from AST evidence.
 from knowledge.models import create_knowledge_document
 from knowledge.loader import load_security_knowledge, chunk_security_knowledge
 from knowledge.sample_data import SAMPLE_SECURITY_KNOWLEDGE
+from knowledge.curated_owasp import CURATED_OWASP_KNOWLEDGE
 from rag.ingestion import ingest_security_knowledge
 
 __all__ = [
@@ -14,5 +15,7 @@ __all__ = [
     "load_security_knowledge",
     "chunk_security_knowledge",
     "SAMPLE_SECURITY_KNOWLEDGE",
+    "CURATED_OWASP_KNOWLEDGE",
     "ingest_security_knowledge",
 ]
+

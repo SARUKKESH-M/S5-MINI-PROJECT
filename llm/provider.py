@@ -4,7 +4,13 @@ Provides an abstract LLMProvider base class and a deterministic MockLLMProvider
 that executes offline without external network calls, API keys, or code execution.
 """
 
+import os
 from typing import Any, Dict, List, Optional, Set
+
+
+class LLMProviderError(Exception):
+    """Base exception for LLM provider execution or communication errors."""
+    pass
 
 
 class LLMProvider:
@@ -18,6 +24,10 @@ class LLMProvider:
     ) -> Dict[str, Any]:
         """Analyze security context and return structured findings dictionary."""
         raise NotImplementedError("Subclasses must implement analyze()")
+
+    def explain_findings(self, findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Optional hook for Stage 7A finding explanation enrichment."""
+        return findings
 
 
 class MockLLMProvider(LLMProvider):
@@ -145,3 +155,50 @@ class MockLLMProvider(LLMProvider):
             item["enriched_by"] = enriched_by
             explained.append(item)
         return explained
+
+
+def get_llm_provider(
+    settings: Optional[Any] = None,
+    provider: Optional[LLMProvider] = None,
+    force_fallback: bool = False,
+) -> LLMProvider:
+    """Factory to acquire the configured LLM provider according to project settings.
+
+    Expected order:
+      - If Groq API key is configured: Groq -> Ollama -> Mock
+      - If Groq API key is unconfigured: Ollama -> Mock
+      - In automated test environments (unless force_fallback=True): defaults safely to MockLLMProvider
+        to enforce zero external network calls during regression testing.
+    """
+    if provider is not None:
+        return provider
+
+    # Enforce safe offline behavior during automated test runs unless live testing is explicitly requested
+    if not force_fallback and os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("CODESENTINEL_TEST_LIVE_PROVIDERS"):
+        return MockLLMProvider()
+
+    if settings is None:
+        try:
+            from backend.app.core.config import settings as app_settings
+            settings = app_settings
+        except ImportError:
+            try:
+                from app.core.config import settings as app_settings
+                settings = app_settings
+            except ImportError:
+                settings = None
+
+    groq_key = getattr(settings, "GROQ_API_KEY", None) if settings else os.getenv("GROQ_API_KEY")
+
+    from llm.groq_provider import GroqLLMProvider
+    from llm.ollama_provider import OllamaLLMProvider
+    from llm.fallback_provider import FallbackLLMProvider
+
+    if groq_key:
+        groq_prov = GroqLLMProvider(api_key=groq_key)
+        ollama_prov = OllamaLLMProvider()
+        return FallbackLLMProvider(providers=[groq_prov, ollama_prov, MockLLMProvider()])
+
+    ollama_prov = OllamaLLMProvider()
+    return FallbackLLMProvider(providers=[ollama_prov, MockLLMProvider()])
+

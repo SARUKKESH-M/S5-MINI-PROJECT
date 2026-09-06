@@ -59,3 +59,23 @@ def platform_policies() -> List[Dict[str, Any]]:
 def platform_metrics() -> Dict[str, Any]:
     """Returns structured internal observability metrics."""
     return metrics_collector.get_summary()
+
+
+@router.get("/developers")
+def platform_developers(
+    limit: Optional[int] = Query(20, ge=1, le=100, description="Maximum number of developers to return"),
+    repository: Optional[str] = Query(None, description="Optional repository name filter"),
+) -> Dict[str, Any]:
+    """Returns developer security analytics aggregated from persistent analysis records."""
+    try:
+        from backend.analysis.storage.store import AnalysisStore
+    except ImportError:
+        from analysis.storage.store import AnalysisStore
+
+    store = AnalysisStore()
+    developers = store.get_developer_analytics(limit=limit or 20, repository=repository)
+    return {
+        "status": "success",
+        "developers": developers,
+        "total_developers": len(developers),
+    }

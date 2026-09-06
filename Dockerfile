@@ -36,6 +36,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # 5. Copy application source files
 COPY --chown=codesentinel:codesentinel ast_engine /app/ast_engine
 COPY --chown=codesentinel:codesentinel backend /app/backend
+COPY --chown=codesentinel:codesentinel knowledge /app/knowledge
 COPY --chown=codesentinel:codesentinel rag /app/rag
 COPY --chown=codesentinel:codesentinel llm /app/llm
 COPY --chown=codesentinel:codesentinel cli /app/cli

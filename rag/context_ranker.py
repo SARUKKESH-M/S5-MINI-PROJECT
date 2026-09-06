@@ -117,6 +117,7 @@ def _calculate_metadata_bonus(query_tokens: Set[str], meta: Dict[str, Any]) -> f
         return 0.0
 
     target_fields = [
+        "cwe_id",
         "signal_type",
         "signal_name",
         "document_type",
@@ -136,6 +137,21 @@ def _calculate_metadata_bonus(query_tokens: Set[str], meta: Dict[str, Any]) -> f
                 bonus += 0.25
 
     return bonus
+
+
+def _calculate_cwe_bonus(query_tokens: Set[str], meta: Dict[str, Any]) -> float:
+    """Calculate deterministic exact CWE match bonus (1.0 bonus for exact CWE match)."""
+    if not query_tokens or not meta:
+        return 0.0
+    doc_cwe = str(meta.get("cwe_id", "") or "").strip().lower()
+    if not doc_cwe:
+        return 0.0
+    cwe_tokens = _extract_tokens(doc_cwe)
+    if cwe_tokens and cwe_tokens.issubset(query_tokens):
+        return 1.0
+    if doc_cwe.replace("-", "") in [t.replace("-", "") for t in query_tokens]:
+        return 1.0
+    return 0.0
 
 
 def rank_and_deduplicate_context(
@@ -262,8 +278,9 @@ def rank_and_deduplicate_context(
         priority = _calculate_source_priority(metadata)
         token_bonus = _calculate_token_overlap_bonus(query_tokens, content)
         meta_bonus = _calculate_metadata_bonus(query_tokens, metadata)
+        cwe_bonus = _calculate_cwe_bonus(query_tokens, metadata)
 
-        relevance_score = round(priority + token_bonus + meta_bonus, 4)
+        relevance_score = round(priority + token_bonus + meta_bonus + cwe_bonus, 4)
 
         scored_documents.append({
             "document_id": doc_id,

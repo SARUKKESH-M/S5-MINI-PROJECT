@@ -114,7 +114,7 @@ def test_repository_secret_audit():
     token_literal_pattern = re.compile(r"(ghp_[a-zA-Z0-9]{20,}|gho_[a-zA-Z0-9]{20,}|github_pat_[a-zA-Z0-9]{20,})")
 
     for root, _, files in os.walk(backend_dir):
-        if ".venv" in root or "__pycache__" in root:
+        if ".venv" in root or "venv" in root or "__pycache__" in root:
             continue
         for file in files:
             if file.endswith(".py"):

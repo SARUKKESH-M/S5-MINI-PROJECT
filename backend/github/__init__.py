@@ -41,8 +41,12 @@ from backend.github.publisher import (
 )
 from backend.github.commenter import (
     COMMENT_MARKER,
+    INLINE_COMMENT_MARKER_PREFIX,
     format_pr_security_comment,
-    post_pr_security_comment
+    post_pr_security_comment,
+    format_inline_finding_comment,
+    extract_inline_commentable_findings,
+    post_pr_inline_review_comments
 )
 from backend.github.orchestrator import orchestrate_webhook_event
 
@@ -75,7 +79,11 @@ __all__ = [
     "create_commit_status",
     "publish_step_6o_report_status",
     "COMMENT_MARKER",
+    "INLINE_COMMENT_MARKER_PREFIX",
     "format_pr_security_comment",
     "post_pr_security_comment",
+    "format_inline_finding_comment",
+    "extract_inline_commentable_findings",
+    "post_pr_inline_review_comments",
     "orchestrate_webhook_event"
 ]
