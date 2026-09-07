@@ -140,6 +140,84 @@ def _is_dynamic_sql_construction(node: Optional[Any]) -> bool:
     return False
 
 
+def _collect_child_process_bindings(root_node: Any) -> Tuple[Set[str], Dict[str, str]]:
+    """Deterministic AST pre-pass collecting proven child_process module and function bindings.
+
+    Only registers bindings where source is strictly literal 'child_process'.
+    Returns:
+        cp_aliases: Set of object alias identifiers, e.g. {'child_process', 'cp', 'childProc'}
+        cp_fn_aliases: Dict mapping destructured identifier to canonical method, e.g. {'exec': 'exec', 'runCmd': 'exec'}
+    """
+    cp_aliases: Set[str] = {"child_process"}
+    cp_fn_aliases: Dict[str, str] = {}
+
+    def _is_exact_child_process_module(node: Optional[Any]) -> bool:
+        if node is None:
+            return False
+        if node.type == "string":
+            raw = _text(node).strip("'\"`")
+            return raw == "child_process"
+        return False
+
+    def _inspect(node: Any) -> None:
+        # CommonJS: const cp = require("child_process") or const { exec } = require("child_process")
+        if node.type == "variable_declarator":
+            val = node.child_by_field_name("value")
+            if val is not None and val.type == "call_expression":
+                fn = val.child_by_field_name("function")
+                args_node = val.child_by_field_name("arguments")
+                if fn and _text(fn) == "require" and args_node:
+                    arg_children = [c for c in args_node.children if c.type not in ("(", ")", ",")]
+                    if len(arg_children) == 1 and _is_exact_child_process_module(arg_children[0]):
+                        name_node = node.child_by_field_name("name")
+                        if name_node is not None:
+                            if name_node.type == "identifier":
+                                cp_aliases.add(_text(name_node))
+                            elif name_node.type == "object_pattern":
+                                for child in name_node.children:
+                                    if child.type == "shorthand_property_identifier_pattern":
+                                        prop = _text(child)
+                                        if prop in ("exec", "execSync"):
+                                            cp_fn_aliases[prop] = prop
+                                    elif child.type == "pair_pattern":
+                                        key_child = child.child_by_field_name("key")
+                                        val_child = child.child_by_field_name("value")
+                                        if key_child and val_child and val_child.type == "identifier":
+                                            orig_prop = _text(key_child)
+                                            local_name = _text(val_child)
+                                            if orig_prop in ("exec", "execSync"):
+                                                cp_fn_aliases[local_name] = orig_prop
+
+        # ES Module: import cp from "child_process" or import { exec, execSync as runSync } from "child_process"
+        elif node.type == "import_statement":
+            src = node.child_by_field_name("source")
+            if _is_exact_child_process_module(src):
+                for child in node.children:
+                    if child.type == "import_clause":
+                        for clause_child in child.children:
+                            if clause_child.type == "identifier":
+                                cp_aliases.add(_text(clause_child))
+                            elif clause_child.type == "named_imports":
+                                for spec in clause_child.children:
+                                    if spec.type == "import_specifier":
+                                        name = spec.child_by_field_name("name")
+                                        alias = spec.child_by_field_name("alias")
+                                        if name:
+                                            orig_name = _text(name)
+                                            if orig_name in ("exec", "execSync"):
+                                                if alias and alias.type == "identifier":
+                                                    local_name = _text(alias)
+                                                else:
+                                                    local_name = orig_name
+                                                cp_fn_aliases[local_name] = orig_name
+
+        for child in node.children:
+            _inspect(child)
+
+    _inspect(root_node)
+    return cp_aliases, cp_fn_aliases
+
+
 def analyze_javascript_security_structure(
     source_code: str,
     file_path: str = "",
@@ -161,6 +239,7 @@ def analyze_javascript_security_structure(
 
     signals: List[Dict[str, Any]] = []
     seen: Set[Tuple[str, str, int]] = set()
+    cp_aliases, cp_fn_aliases = _collect_child_process_bindings(tree.root_node)
 
     def add_signal(
         signal_type: str,
@@ -173,6 +252,7 @@ def analyze_javascript_security_structure(
         related_variables: List[str],
         message: str,
         assessment: Optional[Dict[str, Any]] = None,
+        cwe: str = "",
     ) -> None:
         key = (signal_type, name, line)
         if key in seen:
@@ -190,6 +270,7 @@ def analyze_javascript_security_structure(
             "signal_type": signal_type,
             "severity": severity,
             "confidence": confidence,
+            "cwe": cwe,
             "call_name": name,
             "name": name,
             "evidence": clean_evidence,
@@ -205,24 +286,29 @@ def analyze_javascript_security_structure(
         return [c for c in args_node.children if c.type not in ("(", ")", ",")]
 
     def _is_child_process_exec(fn_node: Any) -> Optional[str]:
-        if fn_node.type != "member_expression":
-            return None
-        prop = fn_node.child_by_field_name("property")
-        prop_name = _text(prop)
-        if prop_name not in ("exec", "execSync"):
-            return None
-        obj = fn_node.child_by_field_name("object")
-        if obj is None:
-            return None
-        if obj.type == "identifier" and _text(obj) == "child_process":
-            return f"child_process.{prop_name}"
-        if obj.type == "call_expression":
-            req_fn = obj.child_by_field_name("function")
-            req_args = obj.child_by_field_name("arguments")
-            if req_fn and _text(req_fn) == "require" and req_args:
-                arg_texts = [_text(c).strip("'\"`") for c in req_args.children if c.type not in ("(", ")", ",")]
-                if "child_process" in arg_texts:
-                    return f"require(\"child_process\").{prop_name}"
+        if fn_node.type == "member_expression":
+            prop = fn_node.child_by_field_name("property")
+            prop_name = _text(prop)
+            if prop_name not in ("exec", "execSync"):
+                return None
+            obj = fn_node.child_by_field_name("object")
+            if obj is None:
+                return None
+            if obj.type == "identifier":
+                obj_name = _text(obj)
+                if obj_name in cp_aliases:
+                    return f"{obj_name}.{prop_name}"
+            elif obj.type == "call_expression":
+                req_fn = obj.child_by_field_name("function")
+                req_args = obj.child_by_field_name("arguments")
+                if req_fn and _text(req_fn) == "require" and req_args:
+                    arg_texts = [_text(c).strip("'\"`") for c in req_args.children if c.type not in ("(", ")", ",")]
+                    if len(arg_texts) == 1 and arg_texts[0] == "child_process":
+                        return f"require(\"child_process\").{prop_name}"
+        elif fn_node.type == "identifier":
+            ident_name = _text(fn_node)
+            if ident_name in cp_fn_aliases:
+                return ident_name
         return None
 
     def walk(node: Any) -> None:
@@ -251,6 +337,7 @@ def analyze_javascript_security_structure(
                                 [_text(left)],
                                 f"Dynamic or untrusted content is injected into the DOM via {prop_name} without sanitization.",
                                 {"sink": prop_name, "dynamic": True},
+                                cwe="CWE-79",
                             )
                 # Assignment Secret: apiKey = "sk-..."
                 elif left.type == "identifier":
@@ -269,6 +356,7 @@ def analyze_javascript_security_structure(
                                 [var_name],
                                 "A secret-like variable is assigned a string literal.",
                                 {"variable": var_name},
+                                cwe="CWE-798",
                             )
 
         # 2. Variable Declarators: const apiKey = "sk-..."
@@ -291,16 +379,20 @@ def analyze_javascript_security_structure(
                             [var_name],
                             "A secret-like variable is assigned a string literal.",
                             {"variable": var_name},
+                            cwe="CWE-798",
                         )
 
-        # 3. Call Expressions: insertAdjacentHTML & child_process.exec / execSync
+        # 3. Call Expressions: DOM sinks, eval, child_process, and database sinks
         elif node.type == "call_expression":
             fn_node = node.child_by_field_name("function")
             if fn_node is not None:
-                # insertAdjacentHTML
+                # 3a. Member expression sinks (insertAdjacentHTML, document.write / writeln)
                 if fn_node.type == "member_expression":
                     prop = fn_node.child_by_field_name("property")
-                    if _text(prop) == "insertAdjacentHTML":
+                    prop_name = _text(prop)
+
+                    # insertAdjacentHTML
+                    if prop_name == "insertAdjacentHTML":
                         args = _get_call_arguments(node)
                         if len(args) > 1:
                             payload_arg = args[1]
@@ -316,8 +408,49 @@ def analyze_javascript_security_structure(
                                     [_text(fn_node)],
                                     "Dynamic content is injected into the DOM via insertAdjacentHTML without sanitization.",
                                     {"sink": "insertAdjacentHTML", "dynamic": True},
+                                    cwe="CWE-79",
                                 )
-                # child_process.exec / execSync
+
+                    # document.write / document.writeln
+                    obj = fn_node.child_by_field_name("object")
+                    if obj is not None and obj.type == "identifier" and _text(obj) == "document":
+                        if prop_name in ("write", "writeln"):
+                            args = _get_call_arguments(node)
+                            if args and not _is_static_string(args[0]):
+                                sink_name = f"document.{prop_name}"
+                                add_signal(
+                                    "dom_xss_call",
+                                    "xss",
+                                    "high",
+                                    "high",
+                                    sink_name,
+                                    line,
+                                    _text(node),
+                                    [sink_name],
+                                    f"Dynamic content is written directly to the document via {sink_name} without sanitization.",
+                                    {"sink": sink_name, "dynamic": True},
+                                    cwe="CWE-79",
+                                )
+
+                # 3b. Direct identifier sinks: eval(...)
+                elif fn_node.type == "identifier" and _text(fn_node) == "eval":
+                    args = _get_call_arguments(node)
+                    if args and not _is_static_string(args[0]):
+                        add_signal(
+                            "dynamic_code_execution",
+                            "dynamic_code_execution",
+                            "critical",
+                            "high",
+                            "eval",
+                            line,
+                            _text(node),
+                            ["eval"],
+                            "Arbitrary code execution sink eval() is invoked with a dynamic expression.",
+                            {"sink": "eval", "dynamic": True},
+                            cwe="CWE-95",
+                        )
+
+                # 3c. child_process.exec / execSync (direct, aliased, or destructured)
                 cp_target = _is_child_process_exec(fn_node)
                 if cp_target:
                     args = _get_call_arguments(node)
@@ -335,9 +468,10 @@ def analyze_javascript_security_structure(
                                 [cp_target],
                                 "Operating system command execution sink is invoked with a dynamic command string.",
                                 {"command_sink": cp_target, "dynamic_command": True},
+                                cwe="CWE-78",
                             )
 
-                # Database SQL injection sinks
+                # 3d. Database SQL injection sinks
                 sql_target = _is_sql_sink(fn_node)
                 if sql_target:
                     args = _get_call_arguments(node)
@@ -356,6 +490,7 @@ def analyze_javascript_security_structure(
                                     [sql_target],
                                     "A database query is dynamically constructed or cannot be verified as parameterized.",
                                     {"sink": sql_target, "dynamic_sql": True, "parameterized": False},
+                                    cwe="CWE-89",
                                 )
 
         # 4. JSX Attributes: dangerouslySetInnerHTML
@@ -395,6 +530,7 @@ def analyze_javascript_security_structure(
                             ["dangerouslySetInnerHTML"],
                             "Dynamic content is rendered unsafely through React dangerouslySetInnerHTML.",
                             {"sink": "dangerouslySetInnerHTML", "dynamic": True},
+                            cwe="CWE-79",
                         )
 
         for child in node.children:

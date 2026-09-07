@@ -683,3 +683,318 @@ def test_75_sql_triggers_security_gate_block():
     decision, exit_code, _ = evaluate_security_gate(report)
     assert decision == "BLOCK"
     assert exit_code == 1
+
+
+# ===========================================================================
+# Phase 28: child_process Alias, Destructuring, document.write, and eval
+# ===========================================================================
+
+# --- CHILD_PROCESS ALIASES ---
+
+def test_76_cp_exec_alias_detected():
+    source = 'const cp = require("child_process");\ncp.exec(userInput);'
+    signals = _signals(source)
+    cmd = [s for s in signals if s["signal_type"] == "command_execution_call"]
+    assert len(cmd) == 1
+    assert cmd[0]["severity"] == "critical"
+    assert cmd[0]["confidence"] == "high"
+    assert cmd[0]["category"] == "command_execution"
+    assert "CWE-78" in cmd[0]["cwe"]
+    assert cmd[0]["line"] == 2
+    assert "cp.exec" in cmd[0]["name"]
+
+
+def test_77_cp_execsync_alias_detected():
+    source = 'const cp = require("child_process");\ncp.execSync(userInput);'
+    signals = _signals(source)
+    cmd = [s for s in signals if s["signal_type"] == "command_execution_call"]
+    assert len(cmd) == 1
+    assert cmd[0]["severity"] == "critical"
+    assert cmd[0]["confidence"] == "high"
+    assert "CWE-78" in cmd[0]["cwe"]
+
+
+def test_78_arbitrary_alias_childproc_detected():
+    source = 'const childProc = require("child_process");\nchildProc.exec(userInput);'
+    signals = _signals(source)
+    cmd = [s for s in signals if s["signal_type"] == "command_execution_call"]
+    assert len(cmd) == 1
+    assert cmd[0]["severity"] == "critical"
+    assert cmd[0]["confidence"] == "high"
+    assert "CWE-78" in cmd[0]["cwe"]
+    assert "childProc.exec" in cmd[0]["name"]
+
+
+def test_79_multiple_aliases_detected():
+    source = (
+        'const cp1 = require("child_process");\n'
+        'const cp2 = require("child_process");\n'
+        'cp1.exec(userInput);\n'
+        'cp2.execSync(userInput);'
+    )
+    signals = _signals(source)
+    cmd = [s for s in signals if s["signal_type"] == "command_execution_call"]
+    assert len(cmd) == 2
+    assert all(c["severity"] == "critical" for c in cmd)
+    assert all("CWE-78" in c["cwe"] for c in cmd)
+
+
+# --- ES IMPORT ---
+
+def test_80_es_default_import_exec_detected():
+    source = 'import cp from "child_process";\ncp.exec(userInput);'
+    signals = _signals(source)
+    cmd = [s for s in signals if s["signal_type"] == "command_execution_call"]
+    assert len(cmd) == 1
+    assert cmd[0]["severity"] == "critical"
+    assert cmd[0]["confidence"] == "high"
+    assert "CWE-78" in cmd[0]["cwe"]
+
+
+def test_81_es_default_import_execsync_detected():
+    source = 'import cp from "child_process";\ncp.execSync(userInput);'
+    signals = _signals(source)
+    cmd = [s for s in signals if s["signal_type"] == "command_execution_call"]
+    assert len(cmd) == 1
+    assert cmd[0]["severity"] == "critical"
+    assert cmd[0]["confidence"] == "high"
+    assert "CWE-78" in cmd[0]["cwe"]
+
+
+# --- DESTRUCTURING ---
+
+def test_82_destructuring_exec_detected():
+    source = 'const { exec } = require("child_process");\nexec(userInput);'
+    signals = _signals(source)
+    cmd = [s for s in signals if s["signal_type"] == "command_execution_call"]
+    assert len(cmd) == 1
+    assert cmd[0]["severity"] == "critical"
+    assert cmd[0]["confidence"] == "high"
+    assert "CWE-78" in cmd[0]["cwe"]
+    assert cmd[0]["name"] == "exec"
+
+
+def test_83_destructuring_execsync_detected():
+    source = 'const { execSync } = require("child_process");\nexecSync(userInput);'
+    signals = _signals(source)
+    cmd = [s for s in signals if s["signal_type"] == "command_execution_call"]
+    assert len(cmd) == 1
+    assert cmd[0]["severity"] == "critical"
+    assert cmd[0]["confidence"] == "high"
+    assert "CWE-78" in cmd[0]["cwe"]
+    assert cmd[0]["name"] == "execSync"
+
+
+def test_84_renamed_destructuring_runcmd_detected():
+    source = 'const { exec: runCmd } = require("child_process");\nrunCmd(userInput);'
+    signals = _signals(source)
+    cmd = [s for s in signals if s["signal_type"] == "command_execution_call"]
+    assert len(cmd) == 1
+    assert cmd[0]["severity"] == "critical"
+    assert cmd[0]["confidence"] == "high"
+    assert "CWE-78" in cmd[0]["cwe"]
+    assert cmd[0]["name"] == "runCmd"
+
+
+def test_85_renamed_destructuring_runsync_detected():
+    source = 'const { execSync: runSync } = require("child_process");\nrunSync(userInput);'
+    signals = _signals(source)
+    cmd = [s for s in signals if s["signal_type"] == "command_execution_call"]
+    assert len(cmd) == 1
+    assert cmd[0]["severity"] == "critical"
+    assert cmd[0]["confidence"] == "high"
+    assert "CWE-78" in cmd[0]["cwe"]
+    assert cmd[0]["name"] == "runSync"
+
+
+# --- ES NAMED IMPORT ---
+
+def test_86_es_named_import_exec_detected():
+    source = 'import { exec } from "child_process";\nexec(userInput);'
+    signals = _signals(source)
+    cmd = [s for s in signals if s["signal_type"] == "command_execution_call"]
+    assert len(cmd) == 1
+    assert cmd[0]["severity"] == "critical"
+    assert cmd[0]["confidence"] == "high"
+    assert "CWE-78" in cmd[0]["cwe"]
+
+
+def test_87_es_named_import_renamed_runcmd_detected():
+    source = 'import { exec as runCmd } from "child_process";\nrunCmd(userInput);'
+    signals = _signals(source)
+    cmd = [s for s in signals if s["signal_type"] == "command_execution_call"]
+    assert len(cmd) == 1
+    assert cmd[0]["severity"] == "critical"
+    assert cmd[0]["confidence"] == "high"
+    assert "CWE-78" in cmd[0]["cwe"]
+    assert cmd[0]["name"] == "runCmd"
+
+
+# --- SAFE ALIAS CONTROLS ---
+
+def test_88_safe_control_fs_require_clean():
+    source = 'const cp = require("fs");\ncp.exec(userInput);'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "command_execution_call"]
+
+
+def test_89_safe_control_http_require_clean():
+    source = 'const cp = require("http");\ncp.exec(userInput);'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "command_execution_call"]
+
+
+def test_90_safe_control_custom_exec_clean():
+    source = 'const exec = customExec;\nexec(userInput);'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "command_execution_call"]
+
+
+def test_91_safe_control_parameter_shadowing_clean():
+    source = 'function test(exec) {\n    exec(userInput);\n}'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "command_execution_call"]
+
+
+# --- RETAIN EXISTING DIRECT CASES ---
+
+def test_92_retained_direct_child_process_exec():
+    source = 'child_process.exec(userInput);'
+    signals = _signals(source)
+    cmd = [s for s in signals if s["signal_type"] == "command_execution_call"]
+    assert len(cmd) == 1
+    assert cmd[0]["severity"] == "critical"
+    assert "CWE-78" in cmd[0]["cwe"]
+
+
+def test_93_retained_direct_require_child_process_exec():
+    source = 'require("child_process").exec(userInput);'
+    signals = _signals(source)
+    cmd = [s for s in signals if s["signal_type"] == "command_execution_call"]
+    assert len(cmd) == 1
+    assert cmd[0]["severity"] == "critical"
+    assert "CWE-78" in cmd[0]["cwe"]
+
+
+# --- DOM WRITE ---
+
+def test_94_document_write_dynamic_detected():
+    source = 'document.write("Hello " + userInput);'
+    signals = _signals(source)
+    dom = [s for s in signals if s["signal_type"] == "dom_xss_call"]
+    assert len(dom) == 1
+    assert dom[0]["severity"] == "high"
+    assert dom[0]["confidence"] == "high"
+    assert dom[0]["category"] == "xss"
+    assert "CWE-79" in dom[0]["cwe"]
+    assert dom[0]["name"] == "document.write"
+
+
+def test_95_document_writeln_dynamic_detected():
+    source = 'document.writeln(`${userInput}`);'
+    signals = _signals(source)
+    dom = [s for s in signals if s["signal_type"] == "dom_xss_call"]
+    assert len(dom) == 1
+    assert dom[0]["severity"] == "high"
+    assert dom[0]["confidence"] == "high"
+    assert dom[0]["category"] == "xss"
+    assert "CWE-79" in dom[0]["cwe"]
+    assert dom[0]["name"] == "document.writeln"
+
+
+# --- STATIC DOM ---
+
+def test_96_document_write_static_clean():
+    source = 'document.write("Hello");'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "dom_xss_call"]
+
+
+def test_97_document_writeln_static_clean():
+    source = 'document.writeln("<p>Hello</p>");'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "dom_xss_call"]
+
+
+# --- SAFE WRITE RECEIVERS ---
+
+def test_98_safe_write_receiver_logger_clean():
+    source = 'logger.write(userInput);'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "dom_xss_call"]
+
+
+def test_99_safe_write_receiver_mydocument_clean():
+    source = 'myDocument.write(userInput);'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "dom_xss_call"]
+
+
+# --- EVAL ---
+
+def test_100_eval_user_controlled_code_detected():
+    source = 'eval(userControlledCode);'
+    signals = _signals(source)
+    ev = [s for s in signals if s["signal_type"] == "dynamic_code_execution"]
+    assert len(ev) == 1
+    assert ev[0]["severity"] == "critical"
+    assert ev[0]["confidence"] == "high"
+    assert ev[0]["category"] == "dynamic_code_execution"
+    assert "CWE-95" in ev[0]["cwe"]
+    assert ev[0]["name"] == "eval"
+
+
+def test_101_eval_dynamic_prefix_detected():
+    source = 'eval("prefix " + userInput);'
+    signals = _signals(source)
+    ev = [s for s in signals if s["signal_type"] == "dynamic_code_execution"]
+    assert len(ev) == 1
+    assert ev[0]["severity"] == "critical"
+    assert ev[0]["confidence"] == "high"
+    assert "CWE-95" in ev[0]["cwe"]
+
+
+# --- STATIC EVAL ---
+
+def test_102_eval_static_clean():
+    source = 'eval("2 + 2");'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "dynamic_code_execution"]
+
+
+# --- SAFE EVAL RECEIVERS ---
+
+def test_103_safe_eval_myeval_clean():
+    source = 'myEval(userInput);'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "dynamic_code_execution"]
+
+
+def test_104_safe_eval_object_eval_clean():
+    source = 'object.eval(userInput);'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "dynamic_code_execution"]
+
+
+# --- MALFORMED & CONTRACT INTEGRITY ---
+
+def test_105_malformed_javascript_fails_safely():
+    source = 'const cp = require("child_process");\ncp.exec( ;'
+    res = analyze_javascript_security_structure(source, file_path="malformed.js")
+    assert res["language"] == "javascript"
+    assert res["parse_status"] == "has_errors"
+    assert isinstance(res["security_signals"], list)
+
+
+def test_106_phase_28_deterministic_id_and_evidence_contract():
+    source = 'const cp = require("child_process");\ncp.exec(userInput);\ndocument.write(userInput);\neval(userInput);'
+    res1 = analyze_javascript_security_structure(source, file_path="audit.js")
+    res2 = analyze_javascript_security_structure(source, file_path="audit.js")
+    assert len(res1["security_signals"]) == 3
+    assert [s["evidence_id"] for s in res1["security_signals"]] == [s["evidence_id"] for s in res2["security_signals"]]
+    for s in res1["security_signals"]:
+        assert len(s["evidence_id"]) == 64
+        assert s["file_path"] == "audit.js"
+        assert s["line"] >= 2
+        assert len(s["evidence"]) <= 240
+
