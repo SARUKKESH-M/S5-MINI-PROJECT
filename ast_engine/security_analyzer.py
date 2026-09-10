@@ -144,10 +144,57 @@ def analyze_security_structure(source_code: str, file_path: str = "") -> Dict[st
             "related_variables": related_variables, "argument_assessment": assessment or {}, "message": message,
         })
 
+    def inspect_module_secrets(root_node: Any) -> None:
+        for stmt in root_node.children:
+            if stmt.type in {"function_definition", "async_function_definition", "class_definition"}:
+                continue
+            assigns: List[Any] = []
+            if stmt.type == "expression_statement":
+                for c in stmt.children:
+                    if c.type == "assignment":
+                        assigns.append(c)
+            elif stmt.type == "assignment":
+                assigns.append(stmt)
+            for a in assigns:
+                left = a.child_by_field_name("left")
+                right = a.child_by_field_name("right")
+                if left is not None and right is not None and left.type == "identifier":
+                    target = _text(left).strip()
+                    if _secret_like(target) and right.type == "string":
+                        line = a.start_point[0] + 1
+                        add_signal(
+                            "possible_hardcoded_secret",
+                            "credential_management",
+                            "medium",
+                            "medium",
+                            target,
+                            line,
+                            f"{target} assigned a string literal",
+                            [target],
+                            "A secret-like variable is assigned a string literal.",
+                        )
+
     def inspect_function(function_node: Any) -> None:
         parameters = set(_extract_related_variables(function_node.child_by_field_name("parameters")))
         aliases = {name for name in parameters if _secret_like(name)}
         credential_reported = False
+
+        # Collect local assignments within this function: var_name -> [(assign_node, right_node)]
+        local_assignments: Dict[str, List[Tuple[Any, Any]]] = {}
+
+        def collect_assignments(n: Any) -> None:
+            if n.type == "assignment":
+                left = n.child_by_field_name("left")
+                right = n.child_by_field_name("right")
+                if left is not None and right is not None and left.type == "identifier":
+                    vname = _text(left).strip()
+                    if vname:
+                        local_assignments.setdefault(vname, []).append((n, right))
+            for c in n.children:
+                if c.type not in {"function_definition", "async_function_definition", "class_definition"}:
+                    collect_assignments(c)
+
+        collect_assignments(function_node)
 
         def walk(node: Any) -> None:
             nonlocal credential_reported
@@ -175,7 +222,17 @@ def analyze_security_structure(source_code: str, file_path: str = "") -> Dict[st
                 if target and target.split(".")[-1] in _DB_EXEC_NAMES:
                     query_node = arguments[0] if arguments else None
                     query_kind = _expression_kind(query_node)
-                    parameterized = _is_parameterized_query(query_node, arguments)
+                    eval_node = query_node
+
+                    if query_node is not None and query_node.type == "identifier":
+                        vname = _text(query_node).strip()
+                        if vname not in parameters:
+                            preceding = [a for a in local_assignments.get(vname, []) if a[0].end_byte <= node.start_byte]
+                            if len(preceding) == 1:
+                                eval_node = preceding[0][1]
+                                query_kind = _expression_kind(eval_node)
+
+                    parameterized = _is_parameterized_query(eval_node, arguments)
                     if not parameterized and query_kind != "literal":
                         severity = "high" if query_kind in {"string_concatenation", "f_string", "percent_formatting", "format_call"} else "medium"
                         add_signal("unsafe_database_execution", "sql_injection", severity, "high" if severity == "high" else "medium", target, line, _text(node), related,
@@ -237,10 +294,11 @@ def analyze_security_structure(source_code: str, file_path: str = "") -> Dict[st
 
         walk(function_node)
 
+    inspect_module_secrets(tree.root_node)
+
     def traverse(node: Any) -> None:
         if node.type in {"function_definition", "async_function_definition"}:
             inspect_function(node)
-            return
         for child in node.children:
             traverse(child)
 

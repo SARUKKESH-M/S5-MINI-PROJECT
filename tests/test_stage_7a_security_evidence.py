@@ -226,3 +226,210 @@ def test_shelve_open_is_not_flagged_by_deserialization():
     signals = _signals('import shelve\ndef open_db():\n    shelve.open("database.db")')
     assert not [s for s in signals if s["signal_type"] == "insecure_deserialization_call"]
     assert not [s for s in signals if s["signal_type"] == "path_traversal_call"]
+
+
+# ===========================================================================
+# Phase 29: Local Intra-Function SQL Resolution & Module-Level Secret Tests
+# ===========================================================================
+
+# --- SQL Resolution Tests ---
+
+def test_sql_local_variable_concatenation_detected():
+    source = 'def get_user(request):\n    user_id = request.args.get("id")\n    query = "SELECT * FROM users WHERE id=" + user_id\n    db.execute(query)'
+    signals = _signals(source)
+    sql = [s for s in signals if s["signal_type"] == "unsafe_database_execution"]
+    assert len(sql) == 1
+    assert sql[0]["severity"] == "high"
+    assert sql[0]["confidence"] == "high"
+    assert sql[0]["category"] == "sql_injection"
+    assert sql[0]["argument_assessment"]["query_kind"] == "string_concatenation"
+
+
+def test_sql_local_variable_f_string_detected():
+    source = 'def get_user(request):\n    user_id = request.args.get("id")\n    query = f"SELECT * FROM users WHERE id={user_id}"\n    db.execute(query)'
+    signals = _signals(source)
+    sql = [s for s in signals if s["signal_type"] == "unsafe_database_execution"]
+    assert len(sql) == 1
+    assert sql[0]["severity"] == "high"
+    assert sql[0]["confidence"] == "high"
+    assert sql[0]["argument_assessment"]["query_kind"] == "f_string"
+
+
+def test_sql_local_variable_percent_formatting_detected():
+    source = 'def get_user(request):\n    user_id = request.args.get("id")\n    query = "SELECT * FROM users WHERE id=%s" % user_id\n    db.execute(query)'
+    signals = _signals(source)
+    sql = [s for s in signals if s["signal_type"] == "unsafe_database_execution"]
+    assert len(sql) == 1
+    assert sql[0]["severity"] == "high"
+    assert sql[0]["confidence"] == "high"
+    assert sql[0]["argument_assessment"]["query_kind"] == "percent_formatting"
+
+
+def test_sql_local_variable_format_call_detected():
+    source = 'def get_user(request):\n    user_id = request.args.get("id")\n    query = "SELECT * FROM users WHERE id={}".format(user_id)\n    db.execute(query)'
+    signals = _signals(source)
+    sql = [s for s in signals if s["signal_type"] == "unsafe_database_execution"]
+    assert len(sql) == 1
+    assert sql[0]["severity"] == "high"
+    assert sql[0]["confidence"] == "high"
+    assert sql[0]["argument_assessment"]["query_kind"] == "format_call"
+
+
+def test_sql_local_variable_static_query_is_clean():
+    source = 'def get_users():\n    query = "SELECT * FROM users"\n    db.execute(query)'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "unsafe_database_execution"]
+
+
+def test_sql_local_variable_parameterized_query_is_clean():
+    source = 'def get_user(user_id):\n    query = "SELECT * FROM users WHERE id = %s"\n    db.execute(query, (user_id,))'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "unsafe_database_execution"]
+
+
+def test_sql_sink_before_assignment_does_not_resolve_backwards():
+    source = 'def run(user_id):\n    db.execute(query)\n    query = "SELECT * FROM users WHERE id=" + user_id'
+    signals = _signals(source)
+    sql = [s for s in signals if s["signal_type"] == "unsafe_database_execution"]
+    assert len(sql) == 1
+    assert sql[0]["severity"] == "medium"
+    assert sql[0]["confidence"] == "medium"
+    assert sql[0]["argument_assessment"]["query_kind"] == "dynamic_expression"
+
+
+def test_sql_function_parameter_retains_generic_behavior():
+    source = 'def run(query):\n    db.execute(query)'
+    signals = _signals(source)
+    sql = [s for s in signals if s["signal_type"] == "unsafe_database_execution"]
+    assert len(sql) == 1
+    assert sql[0]["severity"] == "medium"
+    assert sql[0]["confidence"] == "medium"
+    assert sql[0]["argument_assessment"]["query_kind"] == "dynamic_expression"
+
+
+def test_sql_ambiguous_multiple_assignments_falls_back_conservatively():
+    source = 'def run(cond, user_id):\n    if cond:\n        query = "SELECT * FROM users WHERE id=" + user_id\n    else:\n        query = "SELECT * FROM users"\n    db.execute(query)'
+    signals = _signals(source)
+    sql = [s for s in signals if s["signal_type"] == "unsafe_database_execution"]
+    assert len(sql) == 1
+    assert sql[0]["severity"] == "medium"
+    assert sql[0]["confidence"] == "medium"
+    assert sql[0]["argument_assessment"]["query_kind"] == "dynamic_expression"
+
+
+def test_sql_nested_function_scope_isolation():
+    source = 'def outer(user_id):\n    query = "SELECT * FROM users WHERE id=" + user_id\n    def inner():\n        db.execute(query)\n    inner()'
+    signals = _signals(source)
+    sql = [s for s in signals if s["signal_type"] == "unsafe_database_execution"]
+    assert len(sql) == 1
+    assert sql[0]["severity"] == "medium"
+    assert sql[0]["confidence"] == "medium"
+
+
+def test_sql_attribute_target_exclusion():
+    source = 'def run(user_id):\n    self.query = "SELECT * FROM users WHERE id=" + user_id\n    db.execute(self.query)'
+    signals = _signals(source)
+    sql = [s for s in signals if s["signal_type"] == "unsafe_database_execution"]
+    assert len(sql) == 1
+    assert sql[0]["severity"] == "medium"
+    assert sql[0]["confidence"] == "medium"
+
+
+def test_sql_call_return_variable_exclusion():
+    source = 'def run(user_id):\n    query = build_query(user_id)\n    db.execute(query)'
+    signals = _signals(source)
+    sql = [s for s in signals if s["signal_type"] == "unsafe_database_execution"]
+    assert len(sql) == 1
+    assert sql[0]["severity"] == "medium"
+    assert sql[0]["confidence"] == "medium"
+
+
+# --- Module-Level Hardcoded Secret Tests ---
+
+def test_module_level_api_secret_key_literal_detected():
+    source = 'API_SECRET_KEY = "sk_live_realistic_secret_key_12345"'
+    signals = _signals(source)
+    secrets = [s for s in signals if s["signal_type"] == "possible_hardcoded_secret"]
+    assert len(secrets) == 1
+    assert secrets[0]["severity"] == "medium"
+    assert secrets[0]["confidence"] == "medium"
+    assert secrets[0]["category"] == "credential_management"
+    assert secrets[0]["name"] == "API_SECRET_KEY"
+
+
+def test_module_level_db_password_literal_detected():
+    source = 'DB_PASSWORD = "SuperSecretPassword123!"'
+    signals = _signals(source)
+    secrets = [s for s in signals if s["signal_type"] == "possible_hardcoded_secret"]
+    assert len(secrets) == 1
+    assert secrets[0]["severity"] == "medium"
+    assert secrets[0]["confidence"] == "medium"
+    assert secrets[0]["name"] == "DB_PASSWORD"
+
+
+def test_module_level_auth_token_literal_detected():
+    source = 'AUTH_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"'
+    signals = _signals(source)
+    secrets = [s for s in signals if s["signal_type"] == "possible_hardcoded_secret"]
+    assert len(secrets) == 1
+    assert secrets[0]["name"] == "AUTH_TOKEN"
+
+
+def test_module_level_os_getenv_is_clean():
+    source = 'API_SECRET_KEY = os.getenv("API_SECRET_KEY")'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "possible_hardcoded_secret"]
+
+
+def test_module_level_os_environ_is_clean():
+    source = 'API_SECRET_KEY = os.environ["API_SECRET_KEY"]'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "possible_hardcoded_secret"]
+
+
+def test_module_level_config_get_is_clean():
+    source = 'SECRET = config.get("SECRET")'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "possible_hardcoded_secret"]
+
+
+def test_module_level_non_secret_constant_is_clean():
+    source = 'API_URL = "https://api.example.com/v1"'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "possible_hardcoded_secret"]
+
+
+def test_module_level_non_string_secret_is_clean():
+    source = 'SECRET_CODE = 12345'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "possible_hardcoded_secret"]
+
+
+def test_module_level_class_attribute_is_excluded():
+    source = 'class Config:\n    SECRET = "class_secret_literal"'
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "possible_hardcoded_secret"]
+
+
+# --- Contract & Invariant Tests ---
+
+def test_phase_29_malformed_python_fails_safely():
+    source = 'API_SECRET_KEY = "sk_live_123"\ndef run():\n    db.execute('
+    res = analyze_security_structure(source, file_path="malformed.py")
+    assert res["language"] == "python"
+    assert res["parse_status"] == "has_errors"
+    assert isinstance(res["security_signals"], list)
+    assert any(s["signal_type"] == "possible_hardcoded_secret" for s in res["security_signals"])
+
+
+def test_phase_29_deterministic_evidence_id_and_length_contract():
+    source = 'API_SECRET_KEY = "sk_live_12345"\ndef run(u):\n    query = "SELECT * FROM users WHERE id=" + u\n    db.execute(query)'
+    res1 = analyze_security_structure(source, file_path="audit.py")
+    res2 = analyze_security_structure(source, file_path="audit.py")
+    assert len(res1["security_signals"]) == 2
+    assert [s["evidence_id"] for s in res1["security_signals"]] == [s["evidence_id"] for s in res2["security_signals"]]
+    for s in res1["security_signals"]:
+        assert len(s["evidence_id"]) == 64
+        assert s["file_path"] == "audit.py"
+        assert len(s["evidence"]) <= 240
+
