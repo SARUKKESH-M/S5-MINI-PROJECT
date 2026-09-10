@@ -15,6 +15,8 @@ router = APIRouter(tags=["Analysis History"])
 class FalsePositiveRequest(BaseModel):
     reason: Optional[str] = None
     repository_id: Optional[str] = None
+    reason_code: Optional[str] = "FALSE_POSITIVE"
+    expires_at: Optional[str] = None
 
 
 def _get_store() -> AnalysisStore:
@@ -111,13 +113,24 @@ def mark_false_positive_endpoint(
 
     reason = payload.reason if payload else None
     repo_id = payload.repository_id if payload else None
+    reason_code = payload.reason_code if payload and payload.reason_code else "FALSE_POSITIVE"
+    expires_at = payload.expires_at if payload else None
 
-    suppression = store.record_false_positive(
-        analysis_id=analysis_id,
-        finding_id=finding_id,
-        reason=reason,
-        repository_id=repo_id,
-    )
+    try:
+        suppression = store.record_false_positive(
+            analysis_id=analysis_id,
+            finding_id=finding_id,
+            reason=reason,
+            repository_id=repo_id,
+            reason_code=reason_code,
+            expires_at=expires_at,
+        )
+    except ValueError as val_err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(val_err),
+        )
+
     if not suppression:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -144,7 +157,15 @@ def get_finding_feedback_endpoint(analysis_id: str, finding_id: str):
         )
 
     feedback = store.get_false_positive(analysis_id=analysis_id, finding_id=finding_id)
-    is_fp = feedback is not None and feedback.get("status") == "ACTIVE"
+    is_fp = False
+    is_exp = False
+    if feedback and feedback.get("status") == "ACTIVE":
+        from backend.analysis.storage.store import is_suppression_active
+        exp_ts = feedback.get("expires_at")
+        is_fp = is_suppression_active("ACTIVE", exp_ts)
+        if exp_ts and not is_fp:
+            is_exp = True
+        feedback["is_expired"] = is_exp
 
     return {
         "status": "success",

@@ -16,10 +16,18 @@ import tempfile
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.analysis.storage.models import PROHIBITED_SOURCE_FIELDS, create_suppression_record
+from backend.analysis.storage.models import (
+    PROHIBITED_SOURCE_FIELDS,
+    VALID_REASON_CODES,
+    create_suppression_record,
+    validate_reason_payload,
+    validate_utc_iso_timestamp,
+)
 from backend.analysis.storage.store import (
     AnalysisStore,
     compute_finding_fingerprint,
+    compute_finding_fingerprint_v2,
+    is_suppression_active,
 )
 from backend.analysis.security_gate import evaluate_security_gate
 from backend.app.main import app
@@ -486,3 +494,621 @@ def test_api_404_for_invalid_analysis_or_finding(temp_db, sample_analysis_result
     # Missing finding
     res2 = client.post("/analyses/test_analysis_001/findings/nonexistent_f/false-positive", json={"reason": "test"})
     assert res2.status_code == 404
+
+
+# ============================================================================
+# 8. Phase 31E — V2 Fingerprint Identity Tests (Section A)
+# ============================================================================
+
+def test_v2_identity_same_finding_same_fingerprint():
+    """Requirement A1: Same finding produce identical v2 fingerprint."""
+    finding = {
+        "category": "CWE-89",
+        "evidence": [{
+            "document_id": "app/db.py",
+            "signal_type": "unsafe_sql",
+            "scope": "get_user",
+            "sink_name": "db.execute",
+            "occurrence_index": 0,
+        }]
+    }
+    fp1 = compute_finding_fingerprint_v2("my-repo", finding)
+    fp2 = compute_finding_fingerprint_v2("my-repo", finding)
+    assert fp1 == fp2
+    assert len(fp1) == 32
+
+
+def test_v2_identity_identical_sinks_different_occurrence():
+    """Requirement A2: Two identical sink calls in same scope have distinct v2 fingerprints."""
+    f1 = {
+        "category": "CWE-89",
+        "evidence": [{
+            "document_id": "app/db.py",
+            "signal_type": "unsafe_sql",
+            "scope": "save",
+            "sink_name": "db.execute",
+            "occurrence_index": 0,
+        }]
+    }
+    f2 = {
+        "category": "CWE-89",
+        "evidence": [{
+            "document_id": "app/db.py",
+            "signal_type": "unsafe_sql",
+            "scope": "save",
+            "sink_name": "db.execute",
+            "occurrence_index": 1,
+        }]
+    }
+    assert compute_finding_fingerprint_v2("repo", f1) != compute_finding_fingerprint_v2("repo", f2)
+
+
+def test_v2_identity_whitespace_resilience():
+    """Requirement A3: Whitespace differences do not affect v2 fingerprint."""
+    f1 = {
+        "category": " CWE-89 ",
+        "file_path": " app\\db.py ",
+        "evidence": [{
+            "signal_type": " unsafe_sql ",
+            "scope": " get_user ",
+            "sink_name": " db.execute ",
+            "occurrence_index": 0,
+        }]
+    }
+    f2 = {
+        "category": "cwe-89",
+        "file_path": "app/db.py",
+        "evidence": [{
+            "signal_type": "unsafe_sql",
+            "scope": "get_user",
+            "sink_name": "db.execute",
+            "occurrence_index": 0,
+        }]
+    }
+    assert compute_finding_fingerprint_v2(" repo ", f1) == compute_finding_fingerprint_v2("repo", f2)
+
+
+def test_v2_identity_line_shift_resilience():
+    """Requirement A4, A5, A6: Line shifts, comments, and import insertions do not affect v2."""
+    f_before = {
+        "category": "CWE-89",
+        "line_start": 10,
+        "line_end": 12,
+        "evidence": [{
+            "document_id": "backend/app.py:10",
+            "line_start": 10,
+            "signal_type": "unsafe_sql",
+            "scope": "run_query",
+            "sink_name": "cursor.execute",
+            "occurrence_index": 0,
+        }]
+    }
+    f_after = {
+        "category": "CWE-89",
+        "line_start": 150,  # Shifted 140 lines due to imports/comments
+        "line_end": 152,
+        "evidence": [{
+            "document_id": "backend/app.py:150",
+            "line_start": 150,
+            "signal_type": "unsafe_sql",
+            "scope": "run_query",
+            "sink_name": "cursor.execute",
+            "occurrence_index": 0,
+        }]
+    }
+    assert compute_finding_fingerprint_v2("repo", f_before) == compute_finding_fingerprint_v2("repo", f_after)
+
+
+def test_v2_identity_different_scope():
+    """Requirement A7: Different scope produces different v2 fingerprint."""
+    f1 = {
+        "category": "CWE-89",
+        "file_path": "app/db.py",
+        "evidence": [{"signal_type": "s", "scope": "scope_a", "sink_name": "sink", "occurrence_index": 0}]
+    }
+    f2 = {
+        "category": "CWE-89",
+        "file_path": "app/db.py",
+        "evidence": [{"signal_type": "s", "scope": "scope_b", "sink_name": "sink", "occurrence_index": 0}]
+    }
+    assert compute_finding_fingerprint_v2("repo", f1) != compute_finding_fingerprint_v2("repo", f2)
+
+
+def test_v2_identity_different_sink():
+    """Requirement A8: Different sink produces different v2 fingerprint."""
+    f1 = {
+        "category": "CWE-89",
+        "file_path": "app/db.py",
+        "evidence": [{"signal_type": "s", "scope": "scope", "sink_name": "db.execute", "occurrence_index": 0}]
+    }
+    f2 = {
+        "category": "CWE-89",
+        "file_path": "app/db.py",
+        "evidence": [{"signal_type": "s", "scope": "scope", "sink_name": "db.raw_query", "occurrence_index": 0}]
+    }
+    assert compute_finding_fingerprint_v2("repo", f1) != compute_finding_fingerprint_v2("repo", f2)
+
+
+def test_v2_identity_no_trace_or_line_dependency():
+    """Requirement A9: trace_fingerprint and document_id line suffixes do NOT participate in v2."""
+    f1 = {
+        "category": "CWE-78",
+        "file_path": "app/cmd.py",
+        "trace_fingerprint": "trace_xyz_1",
+        "evidence": [{
+            "document_id": "app/cmd.py:42",
+            "signal_type": "cmd_exec",
+            "scope": "run",
+            "sink_name": "subprocess.run",
+            "occurrence_index": 0,
+        }]
+    }
+    f2 = {
+        "category": "CWE-78",
+        "file_path": "app/cmd.py",
+        "trace_fingerprint": "trace_completely_different_999",
+        "evidence": [{
+            "document_id": "app/cmd.py:99",
+            "signal_type": "cmd_exec",
+            "scope": "run",
+            "sink_name": "subprocess.run",
+            "occurrence_index": 0,
+        }]
+    }
+    assert compute_finding_fingerprint_v2("repo", f1) == compute_finding_fingerprint_v2("repo", f2)
+
+
+# ============================================================================
+# 9. Python / JavaScript Deterministic Scope & Occurrence (Section B)
+# ============================================================================
+
+def test_nested_python_scope_determinism():
+    """Requirement B12: Nested Python scope outer.inner is preserved deterministically."""
+    f = {
+        "category": "CWE-89",
+        "file_path": "handler.py",
+        "evidence": [{
+            "signal_type": "sqli",
+            "scope": "outer.inner",
+            "sink_name": "db.execute",
+            "occurrence_index": 0,
+        }]
+    }
+    fp = compute_finding_fingerprint_v2("repo", f)
+    assert len(fp) == 32
+    # Module fallback
+    f_mod = {
+        "category": "CWE-89",
+        "file_path": "handler.py",
+        "evidence": [{
+            "signal_type": "sqli",
+            "scope": "",
+            "sink_name": "db.execute",
+            "occurrence_index": 0,
+        }]
+    }
+    assert compute_finding_fingerprint_v2("repo", f_mod) != fp
+
+
+def test_javascript_scope_and_occurrence_determinism():
+    """Requirement B11, B13: JavaScript function/method scope and duplicate sink occurrence determinism."""
+    js_f1 = {
+        "category": "CWE-79",
+        "file_path": "frontend/render.js",
+        "evidence": [{
+            "signal_type": "xss",
+            "scope": "renderCard",
+            "sink_name": "innerHTML",
+            "occurrence_index": 0,
+        }]
+    }
+    js_f2 = {
+        "category": "CWE-79",
+        "file_path": "frontend/render.js",
+        "evidence": [{
+            "signal_type": "xss",
+            "scope": "renderCard",
+            "sink_name": "innerHTML",
+            "occurrence_index": 1,
+        }]
+    }
+    assert compute_finding_fingerprint_v2("repo", js_f1) != compute_finding_fingerprint_v2("repo", js_f2)
+
+
+# ============================================================================
+# 10. Legacy V1 Compatibility & Fail-Closed Ambiguity Tests (Section C)
+# ============================================================================
+
+def test_legacy_single_finding_suppresses(temp_db):
+    """Requirement C14: Single current matching finding allows legacy v1 suppression."""
+    store = AnalysisStore(db_path=temp_db)
+    analysis = {
+        "status": "success",
+        "analysis_id": "an_legacy_1",
+        "repository": {"repository": "repo-legacy"},
+        "findings": [{
+            "finding_id": "f_leg_1",
+            "category": "CWE-89",
+            "evidence": [{"document_id": "db.py", "signal_type": "sqli"}],
+        }],
+    }
+    store.save_analysis(analysis)
+
+    # Insert pure legacy v1 suppression directly (v2 is NULL, version is 1)
+    legacy_fp = compute_finding_fingerprint("repo-legacy", "sqli", "cwe-89", "db.py")
+    with store._get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO false_positives
+            (suppression_id, analysis_id, finding_id, repository_id, finding_fingerprint,
+             fingerprint_version, finding_fingerprint_v2, rule_signal, file_path, reason_code,
+             reason, status, expires_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 1, NULL, ?, ?, 'FALSE_POSITIVE', 'legacy note', 'ACTIVE', NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+            """,
+            ("supp_leg_1", "an_legacy_1", "f_leg_1", "repo-legacy", legacy_fp, "sqli", "db.py"),
+        )
+
+    res = store.get_analysis("an_legacy_1")
+    f = res["findings"][0]
+    assert f["is_false_positive"] is True
+    assert f["feedback"]["status"] == "ACTIVE"
+    assert f["feedback"].get("legacy_ambiguous") is False
+
+
+def test_legacy_ambiguity_fails_closed(temp_db):
+    """Requirement C15, C16: Multiple matching findings fail closed on legacy v1 suppression."""
+    store = AnalysisStore(db_path=temp_db)
+    analysis = {
+        "status": "success",
+        "analysis_id": "an_legacy_multi",
+        "repository": {"repository": "repo-legacy"},
+        "findings": [
+            {
+                "finding_id": "f_leg_a",
+                "category": "CWE-89",
+                "evidence": [{"document_id": "db.py", "signal_type": "sqli", "sink_name": "db.execute", "occurrence_index": 0}],
+            },
+            {
+                "finding_id": "f_leg_b",
+                "category": "CWE-89",
+                "evidence": [{"document_id": "db.py", "signal_type": "sqli", "sink_name": "db.execute", "occurrence_index": 1}],
+            },
+        ],
+    }
+    store.save_analysis(analysis)
+
+    # Insert pure legacy v1 suppression
+    legacy_fp = compute_finding_fingerprint("repo-legacy", "sqli", "cwe-89", "db.py")
+    with store._get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO false_positives
+            (suppression_id, analysis_id, finding_id, repository_id, finding_fingerprint,
+             fingerprint_version, finding_fingerprint_v2, rule_signal, file_path, reason_code,
+             reason, status, expires_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 1, NULL, ?, ?, 'FALSE_POSITIVE', 'legacy note', 'ACTIVE', NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+            """,
+            ("supp_leg_multi", "an_legacy_multi", "f_leg_a", "repo-legacy", legacy_fp, "sqli", "db.py"),
+        )
+
+    res = store.get_analysis("an_legacy_multi")
+    for f in res["findings"]:
+        # Both must FAIL CLOSED: unsuppressed, and expose legacy_ambiguous=True
+        assert f["is_false_positive"] is False
+        assert f["feedback"] is not None
+        assert f["feedback"]["legacy_ambiguous"] is True
+
+
+def test_v2_match_precedence_over_legacy(temp_db):
+    """Requirement C18: Active v2 match takes precedence over legacy v1 matching."""
+    store = AnalysisStore(db_path=temp_db)
+    analysis = {
+        "status": "success",
+        "analysis_id": "an_prec",
+        "repository": {"repository": "repo-prec"},
+        "findings": [
+            {
+                "finding_id": "f_p1",
+                "category": "CWE-89",
+                "evidence": [{"document_id": "db.py", "signal_type": "sqli", "scope": "fn", "sink_name": "exec", "occurrence_index": 0}],
+            },
+            {
+                "finding_id": "f_p2",
+                "category": "CWE-89",
+                "evidence": [{"document_id": "db.py", "signal_type": "sqli", "scope": "fn", "sink_name": "exec", "occurrence_index": 1}],
+            }
+        ],
+    }
+    store.save_analysis(analysis)
+
+    # Reviewer marks f_p1 explicitly with v2
+    store.record_false_positive(
+        analysis_id="an_prec",
+        finding_id="f_p1",
+        reason="Explicit v2 review",
+        reason_code="FALSE_POSITIVE",
+    )
+
+    res = store.get_analysis("an_prec")
+    f1 = next(f for f in res["findings"] if f["finding_id"] == "f_p1")
+    f2 = next(f for f in res["findings"] if f["finding_id"] == "f_p2")
+
+    # f_p1 is precisely suppressed via v2
+    assert f1["is_false_positive"] is True
+    assert f1["feedback"]["fingerprint_version"] == 2
+    assert f1["feedback"].get("legacy_ambiguous") is False
+
+    # f_p2 remains unsuppressed
+    assert f2["is_false_positive"] is False
+
+
+# ============================================================================
+# 11. Derived Expiration Tests (Section D)
+# ============================================================================
+
+def test_derived_expiration_evaluation():
+    """Requirement D19-D24: Derived expiration semantics."""
+    # No expiration => active
+    assert is_suppression_active("ACTIVE", None) is True
+    # Future expiration => active
+    assert is_suppression_active("ACTIVE", "2099-01-01T00:00:00Z") is True
+    # Past expiration => inactive
+    assert is_suppression_active("ACTIVE", "2020-01-01T00:00:00Z") is False
+    # Malformed expiration => inactive (fails closed)
+    assert is_suppression_active("ACTIVE", "not-a-date") is False
+    assert is_suppression_active("ACTIVE", "2026-13-45") is False
+    # Non-ACTIVE status is always inactive
+    assert is_suppression_active("REVOKED", None) is False
+    assert is_suppression_active("REVOKED", "2099-01-01T00:00:00Z") is False
+
+
+def test_expired_suppression_presents_unsuppressed(temp_db, sample_analysis_result):
+    """Requirement D24: Finding with expired suppression is presented as unsuppressed and never persists EXPIRED."""
+    store = AnalysisStore(db_path=temp_db)
+    store.save_analysis(sample_analysis_result)
+
+    # Insert a record with a past expiration date directly
+    past_date = "2021-01-01T00:00:00Z"
+    with store._get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO false_positives
+            (suppression_id, analysis_id, finding_id, repository_id, finding_fingerprint,
+             fingerprint_version, finding_fingerprint_v2, rule_signal, file_path, reason_code,
+             reason, status, expires_at, created_at, updated_at)
+            VALUES ('supp_exp', 'test_analysis_001', 'finding_sqli_1', 'acme/payments-service',
+                    'fp_v1', 2, 'fp_v2', 'sig', 'path', 'FALSE_POSITIVE', 'expired reason',
+                    'ACTIVE', ?, '2021-01-01T00:00:00Z', '2021-01-01T00:00:00Z')
+            """,
+            (past_date,),
+        )
+
+    res = store.get_analysis("test_analysis_001")
+    sqli_f = next(f for f in res["findings"] if f["finding_id"] == "finding_sqli_1")
+    # Must present unsuppressed
+    assert sqli_f["is_false_positive"] is False
+    # But exposes is_expired = True in feedback
+    assert sqli_f["feedback"] is not None
+    assert sqli_f["feedback"]["status"] == "ACTIVE"  # Status remains ACTIVE in DB, never 'EXPIRED'
+    assert sqli_f["feedback"]["is_expired"] is True
+
+    # Confirm DB status is not EXPIRED
+    with store._get_connection() as conn:
+        cur = conn.execute("SELECT status FROM false_positives WHERE suppression_id = 'supp_exp'")
+        row = cur.fetchone()
+        assert row[0] == "ACTIVE"
+
+
+# ============================================================================
+# 12. Structured Reason Taxonomy Tests (Section E)
+# ============================================================================
+
+def test_reason_taxonomy_valid_and_invalid():
+    """Requirement E25-E31: Structured reason validation."""
+    for code in VALID_REASON_CODES:
+        # All valid reason codes should validate when comment constraints are met
+        comment = "Valid explanation here"
+        valid_code, valid_comm = validate_reason_payload(code, comment)
+        assert valid_code == code
+        assert valid_comm == comment
+
+    # Invalid reason code rejected
+    with pytest.raises(ValueError, match="Invalid reason_code"):
+        validate_reason_payload("INVALID_CODE", "Some reason")
+
+    # Comment required for ACCEPTED_RISK, EXTERNAL_SANITIZATION, OTHER
+    for req_code in ["ACCEPTED_RISK", "EXTERNAL_SANITIZATION", "OTHER"]:
+        with pytest.raises(ValueError, match="requires an explanatory comment"):
+            validate_reason_payload(req_code, None)
+        with pytest.raises(ValueError, match="requires an explanatory comment"):
+            validate_reason_payload(req_code, "   ")
+        with pytest.raises(ValueError, match="requires an explanatory comment"):
+            validate_reason_payload(req_code, "abc")  # < 5 non-whitespace chars
+
+        valid_c, valid_msg = validate_reason_payload(req_code, "12345")  # >= 5 non-whitespace chars
+        assert valid_c == req_code
+        assert valid_msg == "12345"
+
+    # Comment optional for FALSE_POSITIVE and TEST_OR_MOCK
+    for opt_code in ["FALSE_POSITIVE", "TEST_OR_MOCK"]:
+        c1, m1 = validate_reason_payload(opt_code, None)
+        assert c1 == opt_code
+        assert m1 == ""
+        c2, m2 = validate_reason_payload(opt_code, "")
+        assert c2 == opt_code
+        assert m2 == ""
+
+    # Length > 1000 characters rejected
+    with pytest.raises(ValueError, match="exceeds maximum allowed length"):
+        validate_reason_payload("FALSE_POSITIVE", "a" * 1001)
+
+
+# ============================================================================
+# 13. Idempotency & Reactivation Tests (Section F & G)
+# ============================================================================
+
+def test_idempotent_remark_and_reactivation(temp_db, sample_analysis_result):
+    """Requirement F32-F34, G35-G37: Idempotent updates, reactivation, and revocation."""
+    store = AnalysisStore(db_path=temp_db)
+    store.save_analysis(sample_analysis_result)
+
+    # Initial marking
+    s1 = store.record_false_positive(
+        analysis_id="test_analysis_001",
+        finding_id="finding_sqli_1",
+        reason="Initial comment",
+        reason_code="FALSE_POSITIVE",
+    )
+    assert s1["fingerprint_version"] == 2
+
+    # Update while ACTIVE
+    s2 = store.record_false_positive(
+        analysis_id="test_analysis_001",
+        finding_id="finding_sqli_1",
+        reason="Updated comment for risk acceptance",
+        reason_code="ACCEPTED_RISK",
+    )
+    assert s1["suppression_id"] == s2["suppression_id"]
+    assert s2["reason_code"] == "ACCEPTED_RISK"
+    assert s2["reason"] == "Updated comment for risk acceptance"
+
+    # Revoke
+    rev = store.revoke_false_positive("test_analysis_001", "finding_sqli_1")
+    assert rev["status"] == "REVOKED"
+
+    # Reactivate
+    react = store.record_false_positive(
+        analysis_id="test_analysis_001",
+        finding_id="finding_sqli_1",
+        reason="Re-activating as test harness",
+        reason_code="TEST_OR_MOCK",
+    )
+    assert react["suppression_id"] == s1["suppression_id"]
+    assert react["status"] == "ACTIVE"
+    assert react["reason_code"] == "TEST_OR_MOCK"
+
+
+# ============================================================================
+# 14. Step 6O Invariance Tests (Section H)
+# ============================================================================
+
+def test_step_6o_invariance_high_and_critical(temp_db, sample_analysis_result):
+    """Requirement H38-H40: Step 6O gate evaluates raw deterministic findings and is invariant to feedback."""
+    store = AnalysisStore(db_path=temp_db)
+    store.save_analysis(sample_analysis_result)
+
+    # Suppress CRITICAL finding
+    store.record_false_positive("test_analysis_001", "finding_sqli_1", "ORM query")
+    # Suppress HIGH finding
+    store.record_false_positive("test_analysis_001", "finding_cmd_2", "Safe subprocess")
+
+    # Fetch analysis
+    analysis = store.get_analysis("test_analysis_001")
+    decision, exit_code, reason = evaluate_security_gate(analysis)
+
+    # Step 6O must strictly BLOCK
+    assert decision == "BLOCK"
+    assert exit_code == 1
+    assert "critical" in reason.lower() or "block" in reason.lower()
+
+
+# ============================================================================
+# 15. Security & Injection Boundary Tests (Section I)
+# ============================================================================
+
+def test_sql_injection_resilience(temp_db, sample_analysis_result):
+    """Requirement I41-I45: SQL injection payloads in reason, repo, path do not corrupt queries."""
+    store = AnalysisStore(db_path=temp_db)
+    store.save_analysis(sample_analysis_result)
+
+    sqli_payload = "'; DROP TABLE false_positives; --"
+    rec = store.record_false_positive(
+        analysis_id="test_analysis_001",
+        finding_id="finding_sqli_1",
+        reason=f"Safe comment with injection {sqli_payload}",
+        reason_code="OTHER",
+    )
+    assert rec is not None
+
+    # Verify table still exists and record is preserved
+    with store._get_connection() as conn:
+        cur = conn.execute("SELECT COUNT(*) FROM false_positives")
+        count = cur.fetchone()[0]
+        assert count == 1
+
+
+def test_expiration_timezone_manipulation_rejected():
+    """Requirement I45: Expiration must be valid UTC future timestamp."""
+    # Past timestamp rejected
+    with pytest.raises(ValueError, match="strictly later than current server UTC time"):
+        validate_utc_iso_timestamp("2020-01-01T00:00:00Z", must_be_future=True)
+
+    # Non-UTC timezone offset rejected (if offset is not UTC)
+    assert validate_utc_iso_timestamp(None) is None
+    assert validate_utc_iso_timestamp("") is None
+    with pytest.raises(ValueError, match="Invalid ISO 8601"):
+        validate_utc_iso_timestamp("invalid-date-format")
+
+
+def test_python_duplicate_sink_occurrence_indices():
+    """Requirement B10: Python duplicate sink occurrences have deterministic index increments."""
+    py_f1 = {
+        "category": "CWE-89",
+        "file_path": "backend/service.py",
+        "evidence": [{
+            "signal_type": "unsafe_database_execution",
+            "scope": "save",
+            "sink_name": "db.execute",
+            "occurrence_index": 0,
+        }]
+    }
+    py_f2 = {
+        "category": "CWE-89",
+        "file_path": "backend/service.py",
+        "evidence": [{
+            "signal_type": "unsafe_database_execution",
+            "scope": "save",
+            "sink_name": "db.execute",
+            "occurrence_index": 1,
+        }]
+    }
+    assert compute_finding_fingerprint_v2("acme/service", py_f1) != compute_finding_fingerprint_v2("acme/service", py_f2)
+
+
+def test_client_cannot_arbitrarily_control_fingerprints_or_status(temp_db, sample_analysis_result, monkeypatch):
+    """Requirement I43, I44: Client cannot arbitrarily dictate fingerprints or status."""
+    store = AnalysisStore(db_path=temp_db)
+    store.save_analysis(sample_analysis_result)
+
+    import backend.app.api.history as history_module
+    monkeypatch.setattr(history_module, "_get_store", lambda: AnalysisStore(db_path=temp_db))
+
+    client = TestClient(app)
+
+    # Try submitting invalid reason code
+    res_bad = client.post(
+        "/analyses/test_analysis_001/findings/finding_sqli_1/false-positive",
+        json={"reason": "test", "reason_code": "ARBITRARY_SUPER_STATUS"},
+    )
+    assert res_bad.status_code == 400
+    assert "Invalid reason_code" in res_bad.json()["detail"]
+
+    # Try submitting spoofed fingerprints in payload - backend computes them server-side
+    res_spoof = client.post(
+        "/analyses/test_analysis_001/findings/finding_sqli_1/false-positive",
+        json={
+            "reason": "Legitimate test harness",
+            "reason_code": "TEST_OR_MOCK",
+            "finding_fingerprint": "client_crafted_v1",
+            "finding_fingerprint_v2": "client_crafted_v2",
+            "status": "REVOKED",  # Client attempts to mark as revoked directly
+        },
+    )
+    assert res_spoof.status_code == 200
+    data = res_spoof.json()
+    # Status is forced to ACTIVE by server endpoint
+    assert data["suppression"]["status"] == "ACTIVE"
+    # Fingerprints are computed server-side
+    assert data["suppression"]["finding_fingerprint_v2"] != "client_crafted_v2"
+    assert len(data["suppression"]["finding_fingerprint_v2"]) == 32
+

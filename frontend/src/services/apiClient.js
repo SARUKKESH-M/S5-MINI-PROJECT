@@ -263,15 +263,23 @@ export async function analyzeSourceCode(payload) {
  * @param {string} findingId 
  * @param {string} [reason=''] 
  * @param {string} [repositoryId=null] 
+ * @param {string} [reasonCode='FALSE_POSITIVE'] 
+ * @param {string} [expiresAt=null] 
  * @returns {Promise<any>}
  */
-export async function markFalsePositive(analysisId, findingId, reason = '', repositoryId = null) {
+export async function markFalsePositive(analysisId, findingId, reason = '', repositoryId = null, reasonCode = 'FALSE_POSITIVE', expiresAt = null) {
   if (!analysisId || !findingId) {
     throw new Error('analysisId and findingId are required to mark false positive');
   }
-  const payload = { reason };
+  const payload = {
+    reason,
+    reason_code: reasonCode || 'FALSE_POSITIVE',
+  };
   if (repositoryId) {
     payload.repository_id = repositoryId;
+  }
+  if (expiresAt) {
+    payload.expires_at = expiresAt;
   }
   return apiPost(`/analyses/${encodeURIComponent(analysisId)}/findings/${encodeURIComponent(findingId)}/false-positive`, payload);
 }
