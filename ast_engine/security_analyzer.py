@@ -4,6 +4,12 @@ import hashlib
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ast_engine.python_parser import parse_python_source
+from ast_engine.taint import (
+    PythonTaintEngine,
+    TaintState,
+    build_argument_assessment,
+    format_evidence_string,
+)
 
 _SECRET_KEYWORDS = {"password", "passwd", "secret", "api_key", "apikey", "token", "access_token", "private_key", "credential", "auth"}
 _DB_EXEC_NAMES = {"execute", "executemany", "executescript"}
@@ -123,6 +129,8 @@ def analyze_security_structure(source_code: str, file_path: str = "") -> Dict[st
     except Exception:
         return {"language": "python", "parse_status": "error", "file_path": file_path, "security_signals": []}
 
+    taint_engine = PythonTaintEngine(tree.root_node, file_path=file_path)
+
     signals: List[Dict[str, Any]] = []
     seen: Set[Tuple[str, str, int]] = set()
 
@@ -233,23 +241,53 @@ def analyze_security_structure(source_code: str, file_path: str = "") -> Dict[st
                                 query_kind = _expression_kind(eval_node)
 
                     parameterized = _is_parameterized_query(eval_node, arguments)
-                    if not parameterized and query_kind != "literal":
-                        severity = "high" if query_kind in {"string_concatenation", "f_string", "percent_formatting", "format_call"} else "medium"
-                        add_signal("unsafe_database_execution", "sql_injection", severity, "high" if severity == "high" else "medium", target, line, _text(node), related,
-                                   "A database query is dynamically constructed or cannot be verified as parameterized.",
-                                   {"query_kind": query_kind, "parameterized": False, "dynamic_value_present": True})
+
+                    trace = None
+                    if query_node is not None:
+                        trace = taint_engine.evaluate_sink_argument(node, query_node, local_scope_node=function_node)
+
+                    if trace is not None and trace.final_state in (TaintState.STATIC, TaintState.SANITIZED):
+                        pass
+                    elif not parameterized and (query_kind != "literal" or (trace is not None and trace.final_state == TaintState.TAINTED)):
+                        if trace is not None and trace.final_state == TaintState.TAINTED:
+                            evidence_text = format_evidence_string(trace.sink, list(trace.sources), list(trace.steps))
+                            assessment = build_argument_assessment(trace)
+                            assessment.update({"query_kind": query_kind, "parameterized": False, "dynamic_value_present": True})
+                            add_signal("unsafe_database_execution", "sql_injection", "high", "high", target, line, evidence_text, related,
+                                       "Untrusted input propagates to SQL query execution sink.",
+                                       assessment)
+                        else:
+                            severity = "high" if query_kind in {"string_concatenation", "f_string", "percent_formatting", "format_call"} else "medium"
+                            add_signal("unsafe_database_execution", "sql_injection", severity, "high" if severity == "high" else "medium", target, line, _text(node), related,
+                                       "A database query is dynamically constructed or cannot be verified as parameterized.",
+                                       {"query_kind": query_kind, "parameterized": False, "dynamic_value_present": True})
                 elif target and _is_command_target(target):
                     command_node = arguments[0] if arguments else None
                     command_kind, shell_true = _expression_kind(command_node), _has_shell_true(arguments)
                     dynamic = command_kind not in {"literal", "argument_vector"}
-                    if shell_true or dynamic:
-                        severity, confidence, message = "critical", "high", "Command execution uses a shell or dynamically constructed command."
-                    elif command_kind == "argument_vector":
-                        severity, confidence, message = "medium", "medium", "External command execution uses an argument vector; shell injection was not detected."
+
+                    trace = None
+                    if command_node is not None:
+                        trace = taint_engine.evaluate_sink_argument(node, command_node, local_scope_node=function_node)
+
+                    if trace is not None and trace.final_state == TaintState.SANITIZED:
+                        pass
+                    elif trace is not None and trace.final_state == TaintState.TAINTED:
+                        evidence_text = format_evidence_string(trace.sink, list(trace.sources), list(trace.steps))
+                        assessment = build_argument_assessment(trace)
+                        assessment.update({"command_kind": command_kind, "shell": shell_true, "dynamic_value_present": True})
+                        add_signal("command_execution_call", "command_execution", "critical", "high", target, line, evidence_text, related,
+                                   "Operating system command execution sink is invoked with untrusted input.",
+                                   assessment)
                     else:
-                        severity, confidence, message = "medium", "medium", "Direct command execution call detected."
-                    add_signal("command_execution_call", "command_execution", severity, confidence, target, line, _text(node), related, message,
-                               {"command_kind": command_kind, "shell": shell_true, "dynamic_value_present": dynamic})
+                        if shell_true or dynamic:
+                            severity, confidence, message = "critical", "high", "Command execution uses a shell or dynamically constructed command."
+                        elif command_kind == "argument_vector":
+                            severity, confidence, message = "medium", "medium", "External command execution uses an argument vector; shell injection was not detected."
+                        else:
+                            severity, confidence, message = "medium", "medium", "Direct command execution call detected."
+                        add_signal("command_execution_call", "command_execution", severity, confidence, target, line, _text(node), related, message,
+                                   {"command_kind": command_kind, "shell": shell_true, "dynamic_value_present": dynamic})
                 elif target and target in _DYNAMIC_EXEC_NAMES:
                     expression_kind = _expression_kind(arguments[0] if arguments else None)
                     add_signal("dynamic_code_execution", "dynamic_code_execution", "critical" if expression_kind != "literal" else "high", "high", target, line, _text(node), related,

@@ -13,6 +13,12 @@ import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ast_engine.javascript_parser import parse_javascript_source
+from ast_engine.taint import (
+    JavaScriptTaintEngine,
+    TaintState,
+    build_argument_assessment,
+    format_evidence_string,
+)
 
 _SECRET_KEYWORDS = {
     "password", "passwd", "secret", "api_key", "apikey",
@@ -129,12 +135,41 @@ def _is_dynamic_concatenation(node: Any) -> bool:
     return has_string and has_dynamic
 
 
+def _resolve_rhs(node: Optional[Any]) -> Optional[Any]:
+    """Resolve identifier node to its preceding local declaration or assignment value."""
+    if node is None or node.type != "identifier":
+        return node
+    target_name = _text(node).strip()
+    curr = node.parent
+    while curr:
+        for c in curr.children:
+            if c.end_byte <= node.start_byte:
+                if c.type in ("variable_declaration", "lexical_declaration"):
+                    for decl in c.children:
+                        if decl.type == "variable_declarator":
+                            name_node = decl.child_by_field_name("name")
+                            val_node = decl.child_by_field_name("value")
+                            if name_node and _text(name_node).strip() == target_name and val_node:
+                                return val_node
+                elif c.type == "expression_statement":
+                    for sub in c.children:
+                        if sub.type == "assignment_expression":
+                            left = sub.child_by_field_name("left")
+                            right = sub.child_by_field_name("right")
+                            if left and _text(left).strip() == target_name and right:
+                                return right
+        curr = curr.parent
+    return node
+
+
 def _is_dynamic_sql_construction(node: Optional[Any]) -> bool:
-    """Return True if query argument is dynamic string concatenation or template interpolation."""
+    """Return True if query argument is dynamic string concatenation, template interpolation, or conditional."""
     if node is None:
         return False
     if node.type == "template_string":
         return any(child.type == "template_substitution" for child in node.children)
+    if node.type in ("ternary_expression", "conditional_expression"):
+        return True
     if _is_dynamic_concatenation(node):
         return True
     return False
@@ -240,6 +275,12 @@ def analyze_javascript_security_structure(
     signals: List[Dict[str, Any]] = []
     seen: Set[Tuple[str, str, int]] = set()
     cp_aliases, cp_fn_aliases = _collect_child_process_bindings(tree.root_node)
+    taint_engine = JavaScriptTaintEngine(
+        tree.root_node,
+        file_path=file_path,
+        cp_aliases=cp_aliases,
+        cp_fn_aliases=set(cp_fn_aliases.keys()),
+    )
 
     def add_signal(
         signal_type: str,
@@ -326,19 +367,38 @@ def analyze_javascript_security_structure(
                     if prop_name in ("innerHTML", "outerHTML"):
                         if not _is_static_string(right):
                             sink_name = f"element.{prop_name}"
-                            add_signal(
-                                "dom_xss_call",
-                                "xss",
-                                "high",
-                                "high",
-                                sink_name,
-                                line,
-                                _text(node),
-                                [_text(left)],
-                                f"Dynamic or untrusted content is injected into the DOM via {prop_name} without sanitization.",
-                                {"sink": prop_name, "dynamic": True},
-                                cwe="CWE-79",
+                            raw_code = _text(node)
+                            refined = taint_engine.refine_finding(
+                                line=line,
+                                sink_name=sink_name,
+                                sink_category="xss",
+                                arg_node=right,
+                                baseline_signal_type="dom_xss_call",
+                                baseline_severity="high",
+                                baseline_evidence=raw_code,
                             )
+                            if not refined.get("suppressed"):
+                                final_sev = refined.get("severity", "high")
+                                final_ev = refined.get("evidence", raw_code)
+                                assessment = {"sink": prop_name, "dynamic": True}
+                                if "taint" in refined:
+                                    assessment["taint"] = refined["taint"]
+                                add_signal(
+                                    refined.get("signal_type", "dom_xss_call"),
+                                    "xss",
+                                    final_sev,
+                                    "high",
+                                    sink_name,
+                                    line,
+                                    final_ev,
+                                    [_text(left)],
+                                    refined.get(
+                                        "message",
+                                        f"Dynamic or untrusted content is injected into the DOM via {prop_name} without sanitization.",
+                                    ),
+                                    assessment,
+                                    cwe="CWE-79",
+                                )
                 # Assignment Secret: apiKey = "sk-..."
                 elif left.type == "identifier":
                     var_name = _text(left)
@@ -397,19 +457,39 @@ def analyze_javascript_security_structure(
                         if len(args) > 1:
                             payload_arg = args[1]
                             if not _is_static_string(payload_arg):
-                                add_signal(
-                                    "dom_xss_call",
-                                    "xss",
-                                    "high",
-                                    "high",
-                                    "element.insertAdjacentHTML",
-                                    line,
-                                    _text(node),
-                                    [_text(fn_node)],
-                                    "Dynamic content is injected into the DOM via insertAdjacentHTML without sanitization.",
-                                    {"sink": "insertAdjacentHTML", "dynamic": True},
-                                    cwe="CWE-79",
+                                sink_name = "element.insertAdjacentHTML"
+                                raw_code = _text(node)
+                                refined = taint_engine.refine_finding(
+                                    line=line,
+                                    sink_name=sink_name,
+                                    sink_category="xss",
+                                    arg_node=payload_arg,
+                                    baseline_signal_type="dom_xss_call",
+                                    baseline_severity="high",
+                                    baseline_evidence=raw_code,
                                 )
+                                if not refined.get("suppressed"):
+                                    final_sev = refined.get("severity", "high")
+                                    final_ev = refined.get("evidence", raw_code)
+                                    assessment = {"sink": "insertAdjacentHTML", "dynamic": True}
+                                    if "taint" in refined:
+                                        assessment["taint"] = refined["taint"]
+                                    add_signal(
+                                        refined.get("signal_type", "dom_xss_call"),
+                                        "xss",
+                                        final_sev,
+                                        "high",
+                                        sink_name,
+                                        line,
+                                        final_ev,
+                                        [_text(fn_node)],
+                                        refined.get(
+                                            "message",
+                                            "Dynamic content is injected into the DOM via insertAdjacentHTML without sanitization.",
+                                        ),
+                                        assessment,
+                                        cwe="CWE-79",
+                                    )
 
                     # document.write / document.writeln
                     obj = fn_node.child_by_field_name("object")
@@ -418,19 +498,38 @@ def analyze_javascript_security_structure(
                             args = _get_call_arguments(node)
                             if args and not _is_static_string(args[0]):
                                 sink_name = f"document.{prop_name}"
-                                add_signal(
-                                    "dom_xss_call",
-                                    "xss",
-                                    "high",
-                                    "high",
-                                    sink_name,
-                                    line,
-                                    _text(node),
-                                    [sink_name],
-                                    f"Dynamic content is written directly to the document via {sink_name} without sanitization.",
-                                    {"sink": sink_name, "dynamic": True},
-                                    cwe="CWE-79",
+                                raw_code = _text(node)
+                                refined = taint_engine.refine_finding(
+                                    line=line,
+                                    sink_name=sink_name,
+                                    sink_category="xss",
+                                    arg_node=args[0],
+                                    baseline_signal_type="dom_xss_call",
+                                    baseline_severity="high",
+                                    baseline_evidence=raw_code,
                                 )
+                                if not refined.get("suppressed"):
+                                    final_sev = refined.get("severity", "high")
+                                    final_ev = refined.get("evidence", raw_code)
+                                    assessment = {"sink": sink_name, "dynamic": True}
+                                    if "taint" in refined:
+                                        assessment["taint"] = refined["taint"]
+                                    add_signal(
+                                        refined.get("signal_type", "dom_xss_call"),
+                                        "xss",
+                                        final_sev,
+                                        "high",
+                                        sink_name,
+                                        line,
+                                        final_ev,
+                                        [sink_name],
+                                        refined.get(
+                                            "message",
+                                            f"Dynamic content is written directly to the document via {sink_name} without sanitization.",
+                                        ),
+                                        assessment,
+                                        cwe="CWE-79",
+                                    )
 
                 # 3b. Direct identifier sinks: eval(...)
                 elif fn_node.type == "identifier" and _text(fn_node) == "eval":
@@ -457,19 +556,38 @@ def analyze_javascript_security_structure(
                     if args:
                         cmd_arg = args[0]
                         if not _is_static_string(cmd_arg):
-                            add_signal(
-                                "command_execution_call",
-                                "command_execution",
-                                "critical",
-                                "high",
-                                cp_target,
-                                line,
-                                _text(node),
-                                [cp_target],
-                                "Operating system command execution sink is invoked with a dynamic command string.",
-                                {"command_sink": cp_target, "dynamic_command": True},
-                                cwe="CWE-78",
+                            raw_code = _text(node)
+                            refined = taint_engine.refine_finding(
+                                line=line,
+                                sink_name=cp_target,
+                                sink_category="command_execution",
+                                arg_node=cmd_arg,
+                                baseline_signal_type="command_execution_call",
+                                baseline_severity="critical",
+                                baseline_evidence=raw_code,
                             )
+                            if not refined.get("suppressed"):
+                                final_sev = refined.get("severity", "critical")
+                                final_ev = refined.get("evidence", raw_code)
+                                assessment = {"command_sink": cp_target, "dynamic_command": True}
+                                if "taint" in refined:
+                                    assessment["taint"] = refined["taint"]
+                                add_signal(
+                                    refined.get("signal_type", "command_execution_call"),
+                                    "command_execution",
+                                    final_sev,
+                                    "high",
+                                    cp_target,
+                                    line,
+                                    final_ev,
+                                    [cp_target],
+                                    refined.get(
+                                        "message",
+                                        "Operating system command execution sink is invoked with a dynamic command string.",
+                                    ),
+                                    assessment,
+                                    cwe="CWE-78",
+                                )
 
                 # 3d. Database SQL injection sinks
                 sql_target = _is_sql_sink(fn_node)
@@ -478,20 +596,40 @@ def analyze_javascript_security_structure(
                     if args:
                         query_arg = args[0]
                         if not _is_static_string(query_arg) and not _is_parameterized_sql(query_arg, args):
-                            if _is_dynamic_sql_construction(query_arg):
-                                add_signal(
-                                    "unsafe_database_execution",
-                                    "sql_injection",
-                                    "high",
-                                    "high",
-                                    sql_target,
-                                    line,
-                                    _text(node),
-                                    [sql_target],
-                                    "A database query is dynamically constructed or cannot be verified as parameterized.",
-                                    {"sink": sql_target, "dynamic_sql": True, "parameterized": False},
-                                    cwe="CWE-89",
+                            eval_query_arg = _resolve_rhs(query_arg)
+                            if _is_dynamic_sql_construction(query_arg) or _is_dynamic_sql_construction(eval_query_arg):
+                                raw_code = _text(node)
+                                refined = taint_engine.refine_finding(
+                                    line=line,
+                                    sink_name=sql_target,
+                                    sink_category="sql_injection",
+                                    arg_node=query_arg,
+                                    baseline_signal_type="unsafe_database_execution",
+                                    baseline_severity="high",
+                                    baseline_evidence=raw_code,
                                 )
+                                if not refined.get("suppressed"):
+                                    final_sev = refined.get("severity", "high")
+                                    final_ev = refined.get("evidence", raw_code)
+                                    assessment = {"sink": sql_target, "dynamic_sql": True, "parameterized": False}
+                                    if "taint" in refined:
+                                        assessment["taint"] = refined["taint"]
+                                    add_signal(
+                                        refined.get("signal_type", "unsafe_database_execution"),
+                                        "sql_injection",
+                                        final_sev,
+                                        "high",
+                                        sql_target,
+                                        line,
+                                        final_ev,
+                                        [sql_target],
+                                        refined.get(
+                                            "message",
+                                            "A database query is dynamically constructed or cannot be verified as parameterized.",
+                                        ),
+                                        assessment,
+                                        cwe="CWE-89",
+                                    )
 
         # 4. JSX Attributes: dangerouslySetInnerHTML
         elif node.type == "jsx_attribute":
