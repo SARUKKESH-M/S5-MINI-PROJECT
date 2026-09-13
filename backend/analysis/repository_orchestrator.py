@@ -194,7 +194,7 @@ def analyze_repository(
             try:
                 normalized_evidence = normalize_security_evidence(src, file_path=path_str)
                 security_evidence = normalized_evidence.get("security_evidence", [])
-                ast_docs = prepare_ast_documents_for_rag(src, file_path=path_str)
+                ast_docs = prepare_ast_documents_for_rag(src, file_path=path_str, normalized_evidence=normalized_evidence)
                 all_ast_docs.extend(ast_docs)
                 all_security_evidence.extend(security_evidence)
 

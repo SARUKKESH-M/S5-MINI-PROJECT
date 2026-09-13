@@ -322,8 +322,76 @@ export async function getFindingFeedback(analysisId, findingId) {
  * @param {Object} [params]
  * @param {number} [params.limit=20]
  * @param {string} [params.repository]
+ * @param {string} [params.time_window]
  * @returns {Promise<any>}
  */
 export async function getDeveloperAnalytics(params = {}) {
   return apiGet('/platform/developers', params);
 }
+
+// ---------------------------------------------------------------------------
+// Security Analytics V2 Endpoints (Phase 32)
+// ---------------------------------------------------------------------------
+
+/**
+ * Retrieve consolidated security analytics summary (GET /analytics/summary)
+ * 
+ * @param {Object} [options]
+ * @param {string} [options.timeWindow='30d'] '7d' | '30d' | '90d' | 'all'
+ * @param {string} [options.repositoryId] Optional repository filter
+ * @returns {Promise<any>}
+ */
+export async function getAnalyticsSummary({ timeWindow = '30d', repositoryId = null } = {}) {
+  const params = {};
+  if (timeWindow) params.time_window = timeWindow;
+  if (repositoryId) params.repository_id = repositoryId;
+  return apiGet('/analytics/summary', params);
+}
+
+/**
+ * Retrieve vulnerability/CWE category aggregations with severity breakdown (GET /analytics/vulnerabilities)
+ * 
+ * @param {Object} [options]
+ * @param {string} [options.timeWindow='30d'] '7d' | '30d' | '90d' | 'all'
+ * @param {string} [options.repositoryId] Optional repository filter
+ * @param {number} [options.limit=20] Bounded results count (1-100)
+ * @returns {Promise<any>}
+ */
+export async function getVulnerabilityAnalytics({ timeWindow = '30d', repositoryId = null, limit = 20 } = {}) {
+  const params = {};
+  if (timeWindow) params.time_window = timeWindow;
+  if (repositoryId) params.repository_id = repositoryId;
+  if (limit) params.limit = limit;
+  return apiGet('/analytics/vulnerabilities', params);
+}
+
+/**
+ * Retrieve multi-repository security risk metrics (GET /analytics/repositories)
+ * 
+ * @param {Object} [options]
+ * @param {string} [options.timeWindow='30d'] '7d' | '30d' | '90d' | 'all'
+ * @param {number} [options.limit=20] Bounded results count (1-100)
+ * @returns {Promise<any>}
+ */
+export async function getRepositoryAnalytics({ timeWindow = '30d', limit = 20 } = {}) {
+  const params = {};
+  if (timeWindow) params.time_window = timeWindow;
+  if (limit) params.limit = limit;
+  return apiGet('/analytics/repositories', params);
+}
+
+/**
+ * Retrieve false-positive suppression intelligence telemetry (GET /analytics/suppressions)
+ * 
+ * @param {Object} [options]
+ * @param {string} [options.timeWindow='30d'] '7d' | '30d' | '90d' | 'all'
+ * @param {string} [options.repositoryId] Optional repository filter
+ * @returns {Promise<any>}
+ */
+export async function getSuppressionAnalytics({ timeWindow = '30d', repositoryId = null } = {}) {
+  const params = {};
+  if (timeWindow) params.time_window = timeWindow;
+  if (repositoryId) params.repository_id = repositoryId;
+  return apiGet('/analytics/suppressions', params);
+}
+

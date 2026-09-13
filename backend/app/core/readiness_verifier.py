@@ -63,7 +63,7 @@ def evaluate_platform_release_readiness() -> Dict[str, Any]:
     try:
         caps = get_platform_capabilities()
         pols = list_available_policies()
-        if len(pols) >= 4 and caps.get("version") == "1.0.0":
+        if len(pols) >= 4 and caps.get("version") == "1.1.0":
             subsystems["policy_engine"] = {"ready": True, "status": "PASS", "details": f"4 policy profiles loaded ({len(caps['enabled_capabilities'])} capabilities)"}
         else:
             subsystems["policy_engine"] = {"ready": False, "status": "FAIL", "details": "Incomplete policy configuration"}
@@ -103,7 +103,7 @@ def evaluate_platform_release_readiness() -> Dict[str, Any]:
     return {
         "release_ready": is_ready,
         "service": "CodeSentinel",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "api_version": "v1",
         "subsystems": subsystems,
         "issues": issues

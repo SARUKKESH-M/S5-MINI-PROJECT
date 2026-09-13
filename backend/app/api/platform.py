@@ -65,6 +65,7 @@ def platform_metrics() -> Dict[str, Any]:
 def platform_developers(
     limit: Optional[int] = Query(20, ge=1, le=100, description="Maximum number of developers to return"),
     repository: Optional[str] = Query(None, description="Optional repository name filter"),
+    time_window: Optional[str] = Query(None, description="Optional time window filter ('7d', '30d', '90d', 'all')"),
 ) -> Dict[str, Any]:
     """Returns developer security analytics aggregated from persistent analysis records."""
     try:
@@ -73,9 +74,14 @@ def platform_developers(
         from analysis.storage.store import AnalysisStore
 
     store = AnalysisStore()
-    developers = store.get_developer_analytics(limit=limit or 20, repository=repository)
+    try:
+        developers = store.get_developer_analytics(limit=limit or 20, repository=repository, time_window=time_window)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     return {
         "status": "success",
         "developers": developers,
         "total_developers": len(developers),
     }
+

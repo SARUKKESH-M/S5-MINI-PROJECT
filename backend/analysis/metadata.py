@@ -36,7 +36,7 @@ def build_analysis_traceability_metadata(
         "cache_hits": max(0, int(cache_hits)),
         "cache_misses": max(0, int(cache_misses)),
         "duration_ms": round(max(0.0, float(duration_ms)), 2),
-        "platform_version": "1.0.0",
+        "platform_version": "1.1.0",
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     }
 

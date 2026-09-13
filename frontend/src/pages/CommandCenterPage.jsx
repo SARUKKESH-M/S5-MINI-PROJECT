@@ -12,14 +12,20 @@ import SeverityDistributionChart from '../components/SeverityDistributionChart';
 import TopVulnerabilitiesChart from '../components/TopVulnerabilitiesChart';
 import {
   getAnalyses,
-  getAnalysisFindings,
   getPlatformMetrics,
   getPlatformHealth,
-  getDeveloperAnalytics
+  getDeveloperAnalytics,
+  getAnalyticsSummary,
+  getVulnerabilityAnalytics,
+  getRepositoryAnalytics,
+  getSuppressionAnalytics
 } from '../services/apiClient';
 
 export default function CommandCenterPage() {
   const navigate = useNavigate();
+
+  // Time window selection state ('7d' | '30d' | '90d' | 'all')
+  const [timeWindow, setTimeWindow] = useState('30d');
 
   // Loading & refreshing state
   const [loading, setLoading] = useState(true);
@@ -52,35 +58,67 @@ export default function CommandCenterPage() {
     error: null
   });
 
-  // 3. Analyses list and aggregated metrics from GET /analyses
+  // 3. Analyses list for audit timeline & latest gate banner (GET /analyses)
   const [analysesList, setAnalysesList] = useState([]);
   const [totalAnalysesCount, setTotalAnalysesCount] = useState(0);
   const [analysesError, setAnalysesError] = useState(null);
 
-  // 4. Aggregated findings & visualizations data
+  // 4. Server-side aggregated analytics data (GET /analytics/*)
   const [severityData, setSeverityData] = useState([]);
+  const [analyticsSummary, setAnalyticsSummary] = useState(null);
+  const [analyticsSummaryError, setAnalyticsSummaryError] = useState(null);
+
   const [topVulnsData, setTopVulnsData] = useState([]);
   const [vulnerabilitiesLoading, setVulnerabilitiesLoading] = useState(true);
   const [vulnerabilitiesError, setVulnerabilitiesError] = useState(null);
 
-  // 5. Repository risk aggregated data
+  // 5. Server-side Repository risk metrics (GET /analytics/repositories)
   const [repositoryRiskList, setRepositoryRiskList] = useState([]);
+  const [repositoryRiskLoading, setRepositoryRiskLoading] = useState(true);
+  const [repositoryRiskError, setRepositoryRiskError] = useState(null);
 
-  // 6. Developer security analytics data (P1 #4)
+  // 6. Server-side Suppression intelligence telemetry (GET /analytics/suppressions)
+  const [suppressionAnalytics, setSuppressionAnalytics] = useState({
+    total_suppressions: 0,
+    active_count: 0,
+    expired_count: 0,
+    revoked_count: 0,
+    reason_distribution: {},
+    fingerprint_version_distribution: { v1: 0, v2: 0 }
+  });
+  const [suppressionError, setSuppressionError] = useState(null);
+
+  // 7. Developer security analytics data (P1 #4)
   const [developerAnalytics, setDeveloperAnalytics] = useState([]);
 
-  // Load all dashboard analytics
-  const fetchDashboardData = async (isManualRefresh = false) => {
+  // Load all dashboard analytics via server-side endpoints
+  const fetchDashboardData = async (isManualRefresh = false, activeWindow = timeWindow) => {
     if (isManualRefresh) setIsRefreshing(true);
+    setVulnerabilitiesLoading(true);
+    setRepositoryRiskLoading(true);
     const nowTime = new Date().toLocaleTimeString();
 
     try {
-      // 1. Concurrently fetch health, metrics, recent analyses, and developer analytics
-      const [healthRes, metricsRes, analysesRes, devRes] = await Promise.allSettled([
+      // Concurrently fetch platform health, telemetry metrics, recent analyses (for stream/banner),
+      // developer analytics, and authoritative server-side analytics V2 aggregations
+      const [
+        healthRes,
+        metricsRes,
+        analysesRes,
+        devRes,
+        summaryRes,
+        vulnsRes,
+        reposRes,
+        suppRes
+      ] = await Promise.allSettled([
         getPlatformHealth(),
         getPlatformMetrics(),
         getAnalyses({ limit: 25, offset: 0 }),
-        getDeveloperAnalytics({ limit: 15 })
+        getDeveloperAnalytics({ limit: 15, time_window: activeWindow }),
+        getAnalyticsSummary({ timeWindow: activeWindow }),
+        getVulnerabilityAnalytics({ timeWindow: activeWindow, limit: 6 }),
+        getRepositoryAnalytics({ timeWindow: activeWindow, limit: 20 }),
+        getSuppressionAnalytics({ timeWindow: activeWindow })
       ]);
 
       // Process Health
@@ -128,11 +166,10 @@ export default function CommandCenterPage() {
         }));
       }
 
-      // Process Analyses
-      let fetchedAnalyses = [];
+      // Process Recent Analyses (for audit events stream and review contract banner)
       if (analysesRes.status === 'fulfilled' && analysesRes.value) {
         const resData = analysesRes.value;
-        fetchedAnalyses = Array.isArray(resData.analyses) ? resData.analyses : [];
+        const fetchedAnalyses = Array.isArray(resData.analyses) ? resData.analyses : [];
         setAnalysesList(fetchedAnalyses);
         setTotalAnalysesCount(resData.total_count ?? fetchedAnalyses.length);
         setAnalysesError(null);
@@ -141,103 +178,76 @@ export default function CommandCenterPage() {
         setAnalysesList([]);
       }
 
-      // Aggregate Severity & Top Vulnerability Types from analyses + findings
-      if (fetchedAnalyses.length > 0) {
-        setVulnerabilitiesLoading(true);
+      // Process Authoritative Server-Side Analytics Summary (GET /analytics/summary)
+      if (summaryRes.status === 'fulfilled' && summaryRes.value?.data) {
+        const sumData = summaryRes.value.data;
+        setAnalyticsSummary(sumData);
+        setAnalyticsSummaryError(null);
 
-        // Calculate severity totals directly from analysis summaries
-        let critTotal = 0;
-        let highTotal = 0;
-        let medTotal = 0;
-        let lowTotal = 0;
-        let infoTotal = 0;
-
-        // Group repository risks
-        const repoMap = new Map();
-
-        fetchedAnalyses.forEach(a => {
-          const s = a.summary || {};
-          critTotal += (s.critical_count || 0);
-          highTotal += (s.high_count || 0);
-          medTotal += (s.medium_count || 0);
-          lowTotal += (s.low_count || 0);
-          infoTotal += (s.info_count || 0);
-
-          const repoInfo = s._repository || {};
-          const repoKey = (repoInfo.owner && repoInfo.repository)
-            ? `${repoInfo.owner}/${repoInfo.repository}`
-            : (a.query?.replace('Repository Analysis: ', '') || 'workspace');
-
-          if (!repoMap.has(repoKey)) {
-            repoMap.set(repoKey, {
-              repoName: repoKey,
-              branch: repoInfo.branch || 'main',
-              analysisCount: 0,
-              totalFindings: 0,
-              criticalCount: 0,
-              highCount: 0,
-              latestGate: (s._review_status || 'allow').toUpperCase(),
-              latestTimestamp: a.created_at
-            });
-          }
-
-          const existing = repoMap.get(repoKey);
-          existing.analysisCount += 1;
-          existing.totalFindings += (a.finding_count || 0);
-          existing.criticalCount += (s.critical_count || 0);
-          existing.highCount += (s.high_count || 0);
-        });
-
+        const sevs = sumData.severities || {};
         setSeverityData([
-          { name: 'Critical', value: critTotal, color: '#ff3b30' },
-          { name: 'High', value: highTotal, color: '#feb700' },
-          { name: 'Medium', value: medTotal, color: '#00f0ff' },
-          { name: 'Low', value: lowTotal, color: '#34c759' },
-          { name: 'Info', value: infoTotal, color: '#b9cacb' }
+          { name: 'Critical', value: sevs.critical || 0, color: '#ff3b30' },
+          { name: 'High', value: sevs.high || 0, color: '#feb700' },
+          { name: 'Medium', value: sevs.medium || 0, color: '#00f0ff' },
+          { name: 'Low', value: sevs.low || 0, color: '#34c759' },
+          { name: 'Info', value: sevs.info || 0, color: '#b9cacb' }
         ]);
-
-        setRepositoryRiskList(Array.from(repoMap.values()));
-
-        // Fetch detailed findings for analyses that have findings to build Top Vulnerabilities
-        const analysesWithFindings = fetchedAnalyses.filter(a => (a.finding_count || 0) > 0).slice(0, 10);
-        
-        if (analysesWithFindings.length > 0) {
-          try {
-            const findingsResponses = await Promise.allSettled(
-              analysesWithFindings.map(a => getAnalysisFindings(a.analysis_id))
-            );
-
-            const vulnCounts = {};
-            findingsResponses.forEach(fr => {
-              if (fr.status === 'fulfilled' && fr.value?.findings) {
-                fr.value.findings.forEach(f => {
-                  const vulnType = f.title || f.category || 'Security Risk';
-                  vulnCounts[vulnType] = (vulnCounts[vulnType] || 0) + 1;
-                });
-              }
-            });
-
-            const sortedVulns = Object.entries(vulnCounts)
-              .map(([name, count]) => ({ name, count }))
-              .sort((a, b) => b.count - a.count)
-              .slice(0, 6);
-
-            setTopVulnsData(sortedVulns);
-            setVulnerabilitiesError(null);
-          } catch (err) {
-            setVulnerabilitiesError('Failed aggregating findings details');
-          }
-        } else {
-          setTopVulnsData([]);
-          setVulnerabilitiesError(null);
-        }
-
-        setVulnerabilitiesLoading(false);
       } else {
+        setAnalyticsSummaryError(summaryRes.reason?.message || 'Analytics summary unavailable');
         setSeverityData([]);
+      }
+
+      // Process Authoritative Server-Side Top Vulnerabilities (GET /analytics/vulnerabilities)
+      // Completely eliminates the old 10-request N+1 getAnalysisFindings loop
+      if (vulnsRes.status === 'fulfilled' && Array.isArray(vulnsRes.value?.vulnerabilities)) {
+        const vulns = vulnsRes.value.vulnerabilities.map(v => ({
+          name: v.category || 'Security Finding',
+          count: v.finding_count || 0,
+          critical_count: v.critical_count || 0,
+          high_count: v.high_count || 0,
+          medium_count: v.medium_count || 0,
+          low_count: v.low_count || 0,
+          info_count: v.info_count || 0,
+        }));
+        setTopVulnsData(vulns);
+        setVulnerabilitiesError(null);
+      } else {
         setTopVulnsData([]);
+        setVulnerabilitiesError(vulnsRes.reason?.message || 'Vulnerability analytics unavailable');
+      }
+
+      // Process Authoritative Server-Side Repository Analytics (GET /analytics/repositories)
+      // Completely eliminates client-side 25-record Map reconstruction
+      if (reposRes.status === 'fulfilled' && Array.isArray(reposRes.value?.repositories)) {
+        const repos = reposRes.value.repositories.map(r => {
+          const revs = r.review_status_distribution || {};
+          const latestGate = revs.block > 0 ? 'BLOCK' : revs.review > 0 ? 'REVIEW' : 'ALLOW';
+          return {
+            repoName: r.repository_id || 'default',
+            branch: 'main',
+            analysisCount: r.analysis_count || 0,
+            totalFindings: r.finding_count || 0,
+            criticalCount: r.critical_count || 0,
+            highCount: r.high_count || 0,
+            mediumCount: r.medium_count || 0,
+            lowCount: r.low_count || 0,
+            latestGate: latestGate,
+            latestTimestamp: r.last_analysis_timestamp || ''
+          };
+        });
+        setRepositoryRiskList(repos);
+        setRepositoryRiskError(null);
+      } else {
         setRepositoryRiskList([]);
-        setVulnerabilitiesLoading(false);
+        setRepositoryRiskError(reposRes.reason?.message || 'Repository analytics unavailable');
+      }
+
+      // Process Suppression Intelligence Telemetry (GET /analytics/suppressions)
+      if (suppRes.status === 'fulfilled' && suppRes.value?.data) {
+        setSuppressionAnalytics(suppRes.value.data);
+        setSuppressionError(null);
+      } else {
+        setSuppressionError(suppRes.reason?.message || 'Suppression analytics unavailable');
       }
 
       // Process Developer Security Analytics (P1 #4)
@@ -252,6 +262,8 @@ export default function CommandCenterPage() {
       setLastRefreshed(nowTime);
     } finally {
       setLoading(false);
+      setVulnerabilitiesLoading(false);
+      setRepositoryRiskLoading(false);
       if (isManualRefresh) {
         setTimeout(() => setIsRefreshing(false), 300);
       }
@@ -259,13 +271,22 @@ export default function CommandCenterPage() {
   };
 
   useEffect(() => {
-    fetchDashboardData(false);
-  }, []);
+    fetchDashboardData(false, timeWindow);
+  }, [timeWindow]);
 
-  // Compute total findings from severity data
-  const totalFindingsCount = severityData.reduce((acc, d) => acc + (d.value || 0), 0);
-  const criticalFindingsCount = severityData.find(d => d.name === 'Critical')?.value || 0;
-  const highFindingsCount = severityData.find(d => d.name === 'High')?.value || 0;
+  const handleTimeWindowChange = (newWindow) => {
+    if (newWindow !== timeWindow) {
+      setTimeWindow(newWindow);
+    }
+  };
+
+  // Authoritative severity metrics from server-side summary or fallback
+  const totalFindingsCount = analyticsSummary?.total_findings ?? severityData.reduce((acc, d) => acc + (d.value || 0), 0);
+  const criticalFindingsCount = analyticsSummary?.severities?.critical ?? (severityData.find(d => d.name === 'Critical')?.value || 0);
+  const highFindingsCount = analyticsSummary?.severities?.high ?? (severityData.find(d => d.name === 'High')?.value || 0);
+  const mediumFindingsCount = analyticsSummary?.severities?.medium ?? (severityData.find(d => d.name === 'Medium')?.value || 0);
+  const lowFindingsCount = analyticsSummary?.severities?.low ?? (severityData.find(d => d.name === 'Low')?.value || 0);
+
 
   // Most recent analysis record for review banner
   const latestAnalysis = analysesList[0] || null;
@@ -302,7 +323,46 @@ export default function CommandCenterPage() {
             </p>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+            {/* Time Window Selector Controls (7d, 30d, 90d, all) */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              backgroundColor: 'var(--panel-bg-high)',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-xs)',
+              padding: '2px',
+              gap: '2px'
+            }}>
+              {[
+                { id: '7d', label: '7D' },
+                { id: '30d', label: '30D' },
+                { id: '90d', label: '90D' },
+                { id: 'all', label: 'ALL' }
+              ].map(tw => (
+                <button
+                  key={tw.id}
+                  type="button"
+                  data-testid={`time-window-${tw.id}`}
+                  onClick={() => handleTimeWindowChange(tw.id)}
+                  style={{
+                    backgroundColor: timeWindow === tw.id ? 'var(--primary-cyan)' : 'transparent',
+                    color: timeWindow === tw.id ? 'var(--bg-void-lowest)' : 'var(--text-dim)',
+                    border: 'none',
+                    borderRadius: 'var(--radius-xs)',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    padding: '4px 10px',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease-in-out'
+                  }}
+                >
+                  {tw.label}
+                </button>
+              ))}
+            </div>
+
             <PrimaryButton icon="autorenew" onClick={() => fetchDashboardData(true)} disabled={isRefreshing}>
               {isRefreshing ? 'REFRESHING...' : 'REFRESH DASHBOARD'}
             </PrimaryButton>
@@ -312,6 +372,7 @@ export default function CommandCenterPage() {
           </div>
         </div>
       </DataPanel>
+
 
       {/* 2. System Subsystems Status Bar (Real backend checks from /platform/health) */}
       <div style={{
@@ -899,6 +960,127 @@ export default function CommandCenterPage() {
           </div>
         )}
       </DataPanel>
+
+      {/* Suppression Intelligence Telemetry Panel (Phase 31 / Phase 32) */}
+      <DataPanel
+        title="FALSE-POSITIVE INTELLIGENCE &amp; SUPPRESSION TELEMETRY"
+        status="cyan"
+        action={
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--primary-cyan)' }}>
+            <StatusPip status={suppressionAnalytics.active_count > 0 ? 'green' : 'dim'} />
+            <span>TIME WINDOW: {timeWindow.toUpperCase()}</span>
+          </div>
+        }
+      >
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px', marginBottom: '16px' }}>
+          <div style={{
+            backgroundColor: 'var(--panel-bg-high)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 'var(--radius-xs)',
+            padding: '12px 16px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '4px'
+          }}>
+            <LabelCaps style={{ fontSize: '10px' }}>TOTAL SUPPRESSIONS</LabelCaps>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '24px', fontWeight: 700, color: 'var(--text-on-surface)' }}>
+              {suppressionAnalytics.total_suppressions || 0}
+            </span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-dim)' }}>
+              All recorded suppression audits
+            </span>
+          </div>
+
+          <div style={{
+            backgroundColor: 'var(--panel-bg-high)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 'var(--radius-xs)',
+            padding: '12px 16px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '4px'
+          }}>
+            <LabelCaps style={{ fontSize: '10px' }}>ACTIVE SUPPRESSIONS</LabelCaps>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '24px', fontWeight: 700, color: 'var(--status-green)' }}>
+              {suppressionAnalytics.active_count || 0}
+            </span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-dim)' }}>
+              Currently suppressing findings
+            </span>
+          </div>
+
+          <div style={{
+            backgroundColor: 'var(--panel-bg-high)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 'var(--radius-xs)',
+            padding: '12px 16px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '4px'
+          }}>
+            <LabelCaps style={{ fontSize: '10px' }}>DERIVED EXPIRED</LabelCaps>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '24px', fontWeight: 700, color: 'var(--secondary-amber)' }}>
+              {suppressionAnalytics.expired_count || 0}
+            </span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-dim)' }}>
+              TTL elapsed (query-time derived)
+            </span>
+          </div>
+
+          <div style={{
+            backgroundColor: 'var(--panel-bg-high)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 'var(--radius-xs)',
+            padding: '12px 16px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '4px'
+          }}>
+            <LabelCaps style={{ fontSize: '10px' }}>REVOKED</LabelCaps>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '24px', fontWeight: 700, color: 'var(--text-dim)' }}>
+              {suppressionAnalytics.revoked_count || 0}
+            </span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-dim)' }}>
+              Explicitly revoked feedback
+            </span>
+          </div>
+        </div>
+
+        {/* Reason taxonomy distribution badges */}
+        {suppressionAnalytics.reason_distribution && Object.keys(suppressionAnalytics.reason_distribution).length > 0 && (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '8px',
+            padding: '8px 12px',
+            backgroundColor: 'var(--bg-void-low)',
+            borderRadius: 'var(--radius-xs)',
+            border: '1px solid var(--border-subtle)'
+          }}>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-dim)', fontWeight: 700 }}>
+              REASON TAXONOMY:
+            </span>
+            {Object.entries(suppressionAnalytics.reason_distribution).map(([reason, count]) => (
+              <span
+                key={reason}
+                style={{
+                  backgroundColor: 'var(--panel-bg)',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: 'var(--radius-xs)',
+                  padding: '2px 8px',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: '11px',
+                  color: 'var(--text-on-surface)'
+                }}
+              >
+                {reason}: <strong style={{ color: 'var(--primary-cyan)' }}>{count}</strong>
+              </span>
+            ))}
+          </div>
+        )}
+      </DataPanel>
+
 
       {/* 8. Live Event Stream (AI Verdicts) Table Panel (Step 11 — Real recent analysis events) */}
       <DataPanel

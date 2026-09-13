@@ -116,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def cmd_version(args: argparse.Namespace) -> int:
     """Executes 'version' command."""
-    print("CodeSentinel CLI v1.0.0 (API v1)")
+    print("CodeSentinel CLI v1.1.0 (API v1)")
     print("Core Analysis Engine: Static AST + Hybrid RAG + LLM Context Builder")
     return 0
 

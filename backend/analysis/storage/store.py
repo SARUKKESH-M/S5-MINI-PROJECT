@@ -12,18 +12,85 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from backend.analysis.storage.models import (
     ANALYSIS_SCHEMA_VERSION,
+    DEFAULT_COMMIT_RESERVATION_TTL_SECONDS,
+    DEFAULT_DELIVERY_TTL_SECONDS,
+    DEFAULT_TIME_WINDOW,
     VALID_REASON_CODES,
+    VALID_TIME_WINDOWS,
     create_analysis_record,
     create_suppression_record,
     get_utc_now_iso,
+    parse_time_window,
     sanitize_finding_record,
     validate_reason_payload,
     validate_utc_iso_timestamp,
 )
+
+
+def _validate_pr_identity(owner: Any, repository: Any, pr_number: Any, head_sha: Any) -> Tuple[str, str, int, str]:
+    """Validate PR identity parameters using existing GitHub validators without module-level circular imports."""
+    try:
+        from backend.github.validator import (
+            validate_webhook_owner,
+            validate_webhook_repo,
+            validate_pr_number,
+            validate_commit_sha,
+        )
+    except ImportError:
+        try:
+            from github.validator import (
+                validate_webhook_owner,
+                validate_webhook_repo,
+                validate_pr_number,
+                validate_commit_sha,
+            )
+        except ImportError:
+            import re
+            _UNSAFE = re.compile(r"[\x00;&|$\`<>\"\']")
+            _OWNER_REPO = re.compile(r"^[a-zA-Z0-9_.-]+$")
+            _COMMIT = re.compile(r"^[a-fA-F0-9]{40}$")
+            owner_s = str(owner).strip()
+            repo_s = str(repository).strip()
+            if repo_s.lower().endswith(".git"):
+                repo_s = repo_s[:-4]
+            if _UNSAFE.search(owner_s) or ".." in owner_s or "/" in owner_s or "\\" in owner_s or not _OWNER_REPO.match(owner_s):
+                raise ValueError("Invalid owner")
+            if _UNSAFE.search(repo_s) or ".." in repo_s or "/" in repo_s or "\\" in repo_s or not _OWNER_REPO.match(repo_s):
+                raise ValueError("Invalid repo")
+            if isinstance(pr_number, bool):
+                raise ValueError("PR number cannot be a boolean")
+            pr_val = int(str(pr_number).strip())
+            if pr_val <= 0 or pr_val > 1_000_000_000:
+                raise ValueError("Invalid PR")
+            sha_s = str(head_sha).strip().lower()
+            if not _COMMIT.match(sha_s):
+                raise ValueError("Invalid SHA")
+            return owner_s, repo_s, pr_val, sha_s
+
+    clean_owner = validate_webhook_owner(str(owner))
+    clean_repo = validate_webhook_repo(str(repository))
+    clean_pr = validate_pr_number(pr_number)
+    clean_head = validate_commit_sha(str(head_sha))
+    return clean_owner, clean_repo, clean_pr, clean_head
+
+
+def _validate_optional_sha(sha: Any) -> Optional[str]:
+    """Validates an optional commit SHA string."""
+    if not sha:
+        return None
+    try:
+        try:
+            from backend.github.validator import validate_commit_sha
+        except ImportError:
+            from github.validator import validate_commit_sha
+        return validate_commit_sha(str(sha))
+    except Exception:
+        return None
 
 
 def compute_finding_fingerprint(
@@ -134,10 +201,24 @@ def is_suppression_active(status: str, expires_at: Optional[str]) -> bool:
 
 def get_default_db_path() -> str:
     """Return default persistent SQLite database file path."""
+    custom_path = os.environ.get("CODESENTINEL_DB_PATH")
+    if custom_path:
+        os.makedirs(os.path.dirname(os.path.abspath(custom_path)), exist_ok=True)
+        return os.path.abspath(custom_path)
     backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     data_dir = os.path.join(backend_dir, "data")
     os.makedirs(data_dir, exist_ok=True)
     return os.path.join(data_dir, "codesentinel.db")
+
+
+_DB_INIT_LOCK = threading.Lock()
+_INITIALIZED_DATABASES: Dict[str, float] = {}
+
+
+def reset_database_initialization_cache() -> None:
+    """Reset the database initialization cache (useful for isolated tests)."""
+    with _DB_INIT_LOCK:
+        _INITIALIZED_DATABASES.clear()
 
 
 class AnalysisStore:
@@ -148,83 +229,174 @@ class AnalysisStore:
         self.initialize()
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Create and return a configured SQLite connection with foreign keys enabled."""
-        conn = sqlite3.connect(self.db_path)
+        """Create and return a configured SQLite connection with foreign keys and WAL enabled."""
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
+        if self.db_path != ":memory:":
+            try:
+                conn.execute("PRAGMA synchronous = NORMAL;")
+            except sqlite3.OperationalError:
+                pass
         conn.row_factory = sqlite3.Row
         return conn
 
-    def initialize(self) -> None:
-        """Initialize database directory, tables, indexes, and additive Phase 31 columns."""
+    def initialize(self, force: bool = False) -> None:
+        """Initialize database directory, tables, indexes, and additive schema columns.
+
+        Guarded so that schema DDL and migrations execute once per process per database identity,
+        while safely re-initializing if a database file was deleted or recreated.
+        """
         db_dir = os.path.dirname(self.db_path)
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
 
-        with self._get_connection() as conn:
-            conn.executescript("""
-                CREATE TABLE IF NOT EXISTS analyses (
-                    analysis_id TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    query TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    finding_count INTEGER NOT NULL,
-                    summary_json TEXT NOT NULL,
-                    schema_version TEXT NOT NULL
-                );
+        is_memory = self.db_path == ":memory:"
+        norm_path = ":memory:" if is_memory else os.path.normcase(os.path.abspath(self.db_path))
 
-                CREATE TABLE IF NOT EXISTS findings (
-                    finding_id TEXT NOT NULL,
-                    analysis_id TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    severity TEXT NOT NULL,
-                    confidence TEXT NOT NULL,
-                    category TEXT NOT NULL,
-                    evidence_json TEXT NOT NULL,
-                    PRIMARY KEY (analysis_id, finding_id),
-                    FOREIGN KEY (analysis_id) REFERENCES analyses(analysis_id) ON DELETE CASCADE
-                );
+        if not force and not is_memory:
+            with _DB_INIT_LOCK:
+                if os.path.exists(norm_path):
+                    current_mtime = os.path.getmtime(norm_path)
+                    cached_mtime = _INITIALIZED_DATABASES.get(norm_path)
+                    if cached_mtime is not None and cached_mtime == current_mtime:
+                        return
 
-                CREATE TABLE IF NOT EXISTS false_positives (
-                    suppression_id TEXT PRIMARY KEY,
-                    analysis_id TEXT NOT NULL,
-                    finding_id TEXT NOT NULL,
-                    repository_id TEXT NOT NULL,
-                    finding_fingerprint TEXT NOT NULL,
-                    cwe_id TEXT,
-                    rule_signal TEXT NOT NULL,
-                    file_path TEXT NOT NULL,
-                    line_number INTEGER,
-                    status TEXT NOT NULL DEFAULT 'ACTIVE',
-                    reason TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
+        with _DB_INIT_LOCK:
+            if not force and not is_memory and os.path.exists(norm_path):
+                current_mtime = os.path.getmtime(norm_path)
+                cached_mtime = _INITIALIZED_DATABASES.get(norm_path)
+                if cached_mtime is not None and cached_mtime == current_mtime:
+                    return
 
-                CREATE INDEX IF NOT EXISTS idx_findings_analysis_id ON findings(analysis_id);
-                CREATE INDEX IF NOT EXISTS idx_analyses_created_at ON analyses(created_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_fp_repo_fingerprint ON false_positives(repository_id, finding_fingerprint);
-                CREATE INDEX IF NOT EXISTS idx_fp_analysis_finding ON false_positives(analysis_id, finding_id);
-            """)
+            with self._get_connection() as conn:
+                if not is_memory:
+                    try:
+                        conn.execute("PRAGMA journal_mode = WAL;")
+                        conn.execute("PRAGMA synchronous = NORMAL;")
+                    except sqlite3.OperationalError:
+                        pass
 
-            # Additive Phase 31 schema migration for false_positives
-            table_info = conn.execute("PRAGMA table_info(false_positives);").fetchall()
-            existing_cols = {row["name"] for row in table_info}
+                conn.executescript("""
+                    CREATE TABLE IF NOT EXISTS analyses (
+                        analysis_id TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        query TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        finding_count INTEGER NOT NULL,
+                        summary_json TEXT NOT NULL,
+                        schema_version TEXT NOT NULL
+                    );
 
-            if "fingerprint_version" not in existing_cols:
-                conn.execute("ALTER TABLE false_positives ADD COLUMN fingerprint_version INTEGER NOT NULL DEFAULT 1;")
-            if "finding_fingerprint_v2" not in existing_cols:
-                conn.execute("ALTER TABLE false_positives ADD COLUMN finding_fingerprint_v2 TEXT DEFAULT NULL;")
-            if "reason_code" not in existing_cols:
-                conn.execute("ALTER TABLE false_positives ADD COLUMN reason_code TEXT NOT NULL DEFAULT 'FALSE_POSITIVE';")
-            if "expires_at" not in existing_cols:
-                conn.execute("ALTER TABLE false_positives ADD COLUMN expires_at TEXT DEFAULT NULL;")
+                    CREATE TABLE IF NOT EXISTS findings (
+                        finding_id TEXT NOT NULL,
+                        analysis_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        severity TEXT NOT NULL,
+                        confidence TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        evidence_json TEXT NOT NULL,
+                        PRIMARY KEY (analysis_id, finding_id),
+                        FOREIGN KEY (analysis_id) REFERENCES analyses(analysis_id) ON DELETE CASCADE
+                    );
 
-            # Additive Phase 31 indexes
-            conn.executescript("""
-                CREATE INDEX IF NOT EXISTS idx_fp_repo_v2 ON false_positives(repository_id, finding_fingerprint_v2, status);
-                CREATE INDEX IF NOT EXISTS idx_fp_repo_v1 ON false_positives(repository_id, finding_fingerprint, status);
-            """)
+                    CREATE TABLE IF NOT EXISTS false_positives (
+                        suppression_id TEXT PRIMARY KEY,
+                        analysis_id TEXT NOT NULL,
+                        finding_id TEXT NOT NULL,
+                        repository_id TEXT NOT NULL,
+                        finding_fingerprint TEXT NOT NULL,
+                        cwe_id TEXT,
+                        rule_signal TEXT NOT NULL,
+                        file_path TEXT NOT NULL,
+                        line_number INTEGER,
+                        status TEXT NOT NULL DEFAULT 'ACTIVE',
+                        reason TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                        delivery_id TEXT PRIMARY KEY,
+                        event_type TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS pr_commit_reservations (
+                        commit_key TEXT PRIMARY KEY,
+                        owner TEXT NOT NULL,
+                        repository TEXT NOT NULL,
+                        pr_number INTEGER NOT NULL,
+                        head_sha TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        analysis_id TEXT,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_findings_analysis_id ON findings(analysis_id);
+                    CREATE INDEX IF NOT EXISTS idx_analyses_created_at ON analyses(created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_fp_repo_fingerprint ON false_positives(repository_id, finding_fingerprint);
+                    CREATE INDEX IF NOT EXISTS idx_fp_analysis_finding ON false_positives(analysis_id, finding_id);
+                    CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_expires_at ON webhook_deliveries(expires_at);
+                    CREATE INDEX IF NOT EXISTS idx_commit_reservations_lookup ON pr_commit_reservations(owner, repository, pr_number, head_sha);
+                    CREATE INDEX IF NOT EXISTS idx_commit_reservations_expires ON pr_commit_reservations(expires_at);
+                """)
+
+                # Additive Phase 31 schema migration for false_positives
+                table_info = conn.execute("PRAGMA table_info(false_positives);").fetchall()
+                existing_cols = {row["name"] for row in table_info}
+
+                if "fingerprint_version" not in existing_cols:
+                    conn.execute("ALTER TABLE false_positives ADD COLUMN fingerprint_version INTEGER NOT NULL DEFAULT 1;")
+                if "finding_fingerprint_v2" not in existing_cols:
+                    conn.execute("ALTER TABLE false_positives ADD COLUMN finding_fingerprint_v2 TEXT DEFAULT NULL;")
+                if "reason_code" not in existing_cols:
+                    conn.execute("ALTER TABLE false_positives ADD COLUMN reason_code TEXT NOT NULL DEFAULT 'FALSE_POSITIVE';")
+                if "expires_at" not in existing_cols:
+                    conn.execute("ALTER TABLE false_positives ADD COLUMN expires_at TEXT DEFAULT NULL;")
+
+                # Additive Phase 31 indexes
+                conn.executescript("""
+                    CREATE INDEX IF NOT EXISTS idx_fp_repo_v2 ON false_positives(repository_id, finding_fingerprint_v2, status);
+                    CREATE INDEX IF NOT EXISTS idx_fp_repo_v1 ON false_positives(repository_id, finding_fingerprint, status);
+                """)
+
+                # Additive Phase 32 indexes for Security Analytics V2
+                conn.executescript("""
+                    CREATE INDEX IF NOT EXISTS idx_findings_category_severity ON findings(category, severity);
+                    CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity);
+                    CREATE INDEX IF NOT EXISTS idx_fp_status_reason ON false_positives(status, reason_code);
+                    CREATE INDEX IF NOT EXISTS idx_fp_created_at ON false_positives(created_at DESC);
+                """)
+
+                # Additive Phase 33C schema migration for analyses
+                analyses_info = conn.execute("PRAGMA table_info(analyses);").fetchall()
+                analyses_cols = {row["name"] for row in analyses_info}
+
+                if "owner" not in analyses_cols:
+                    conn.execute("ALTER TABLE analyses ADD COLUMN owner TEXT DEFAULT NULL;")
+                if "repository" not in analyses_cols:
+                    conn.execute("ALTER TABLE analyses ADD COLUMN repository TEXT DEFAULT NULL;")
+                if "pr_number" not in analyses_cols:
+                    conn.execute("ALTER TABLE analyses ADD COLUMN pr_number INTEGER DEFAULT NULL;")
+                if "head_sha" not in analyses_cols:
+                    conn.execute("ALTER TABLE analyses ADD COLUMN head_sha TEXT DEFAULT NULL;")
+                if "base_sha" not in analyses_cols:
+                    conn.execute("ALTER TABLE analyses ADD COLUMN base_sha TEXT DEFAULT NULL;")
+                if "author" not in analyses_cols:
+                    conn.execute("ALTER TABLE analyses ADD COLUMN author TEXT DEFAULT NULL;")
+
+                # Additive Phase 33C index for exact PR commit lookup
+                conn.executescript("""
+                    CREATE INDEX IF NOT EXISTS idx_analyses_pr_commit ON analyses(owner, repository, pr_number, head_sha);
+                """)
+
+            if not is_memory and os.path.exists(norm_path):
+                _INITIALIZED_DATABASES[norm_path] = os.path.getmtime(norm_path)
+
 
     def save_analysis(self, analysis_result: Dict[str, Any]) -> Dict[str, Any]:
         """Idempotently save or update analysis result and its associated findings.
@@ -261,6 +433,55 @@ class AnalysisStore:
         if raw_author and isinstance(raw_author, str) and raw_author.strip():
             summary["_author"] = raw_author.strip()[:100]
 
+        # Extract PR / Commit identity fields if present
+        raw_repo_obj = analysis_result.get("repository") if isinstance(analysis_result.get("repository"), dict) else {}
+        raw_owner = (
+            analysis_result.get("owner")
+            or raw_repo_obj.get("owner")
+            or (summary.get("_repository", {}).get("owner") if isinstance(summary.get("_repository"), dict) else None)
+        )
+        raw_repo = (
+            analysis_result.get("repository_id")
+            or (analysis_result.get("repository") if isinstance(analysis_result.get("repository"), str) else None)
+            or raw_repo_obj.get("name")
+            or raw_repo_obj.get("repository")
+            or (summary.get("_repository", {}).get("name") if isinstance(summary.get("_repository"), dict) else None)
+            or (summary.get("_repository", {}).get("repository") if isinstance(summary.get("_repository"), dict) else None)
+        )
+        raw_pr = (
+            analysis_result.get("pr_number")
+            or raw_repo_obj.get("pr_number")
+            or (summary.get("_repository", {}).get("pr_number") if isinstance(summary.get("_repository"), dict) else None)
+        )
+        raw_head = (
+            analysis_result.get("head_sha")
+            or raw_repo_obj.get("head_sha")
+            or (summary.get("_repository", {}).get("head_sha") if isinstance(summary.get("_repository"), dict) else None)
+        )
+        raw_base = (
+            analysis_result.get("base_sha")
+            or raw_repo_obj.get("base_sha")
+            or (summary.get("_repository", {}).get("base_sha") if isinstance(summary.get("_repository"), dict) else None)
+        )
+
+        clean_owner = None
+        clean_repo = None
+        clean_pr = None
+        clean_head = None
+        clean_base = None
+
+        if raw_owner and raw_repo and raw_pr is not None and raw_head:
+            try:
+                clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
+                    raw_owner, raw_repo, raw_pr, raw_head
+                )
+                if raw_base:
+                    clean_base = _validate_optional_sha(raw_base)
+            except Exception:
+                clean_owner, clean_repo, clean_pr, clean_head = None, None, None, None
+
+        clean_author = str(raw_author).strip()[:100] if (raw_author and isinstance(raw_author, str) and raw_author.strip()) else None
+
         raw_findings = analysis_result.get("findings", [])
         if not isinstance(raw_findings, list):
             raw_findings = []
@@ -280,12 +501,13 @@ class AnalysisStore:
             conn.execute("DELETE FROM findings WHERE analysis_id = ?;", (analysis_id,))
             conn.execute("DELETE FROM analyses WHERE analysis_id = ?;", (analysis_id,))
 
-            # Insert analysis record
+            # Insert analysis record with explicit PR identity fields
             conn.execute(
                 """
                 INSERT INTO analyses (
-                    analysis_id, status, query, created_at, finding_count, summary_json, schema_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?);
+                    analysis_id, status, query, created_at, finding_count, summary_json, schema_version,
+                    owner, repository, pr_number, head_sha, base_sha, author
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     record["analysis_id"],
@@ -295,6 +517,12 @@ class AnalysisStore:
                     record["finding_count"],
                     json.dumps(record["summary"]),
                     record["schema_version"],
+                    clean_owner,
+                    clean_repo,
+                    clean_pr,
+                    clean_head,
+                    clean_base,
+                    clean_author,
                 ),
             )
 
@@ -317,6 +545,22 @@ class AnalysisStore:
                         f["category"],
                         json.dumps(f["evidence"]),
                     ),
+                )
+
+            # If valid PR commit identity, complete the reservation atomically
+            if clean_owner and clean_repo and clean_pr is not None and clean_head:
+                commit_key = f"{clean_owner.lower()}/{clean_repo.lower()}:{clean_pr}:{clean_head.lower()}"
+                conn.execute(
+                    """
+                    INSERT INTO pr_commit_reservations (
+                        commit_key, owner, repository, pr_number, head_sha, status, analysis_id, created_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, '9999-12-31T23:59:59+00:00')
+                    ON CONFLICT(commit_key) DO UPDATE SET
+                        status = 'completed',
+                        analysis_id = excluded.analysis_id,
+                        expires_at = '9999-12-31T23:59:59+00:00';
+                    """,
+                    (commit_key, clean_owner, clean_repo, clean_pr, clean_head, analysis_id, created_at)
                 )
 
         return analysis_result
@@ -467,6 +711,20 @@ class AnalysisStore:
                 res["review_status"] = review_stat
             if author:
                 res["author"] = author
+
+            # Attach explicit PR identity fields if present on row
+            row_keys = row.keys()
+            if "owner" in row_keys and row["owner"]:
+                res["owner"] = row["owner"]
+            if "repository" in row_keys and row["repository"]:
+                res["repository_id"] = row["repository"]
+            if "pr_number" in row_keys and row["pr_number"] is not None:
+                res["pr_number"] = row["pr_number"]
+            if "head_sha" in row_keys and row["head_sha"]:
+                res["head_sha"] = row["head_sha"]
+            if "base_sha" in row_keys and row["base_sha"]:
+                res["base_sha"] = row["base_sha"]
+
             return res
 
     def list_analyses(self, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
@@ -818,15 +1076,28 @@ class AnalysisStore:
         self,
         limit: int = 20,
         repository: Optional[str] = None,
+        time_window: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Aggregate developer security activity from persistent analysis records."""
         safe_limit = 20 if limit is None or int(limit) <= 0 else min(100, int(limit))
         target_repo = str(repository).strip().lower() if repository else None
 
+        # Resolve optional time window
+        cutoff_iso = None
+        if time_window:
+            _, cutoff_iso = parse_time_window(time_window)
+
         with self._get_connection() as conn:
-            rows = conn.execute("SELECT * FROM analyses ORDER BY created_at DESC;").fetchall()
+            if cutoff_iso:
+                rows = conn.execute(
+                    "SELECT * FROM analyses WHERE created_at >= ? ORDER BY created_at DESC;",
+                    (cutoff_iso,),
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM analyses ORDER BY created_at DESC;").fetchall()
 
         dev_stats: Dict[str, Dict[str, Any]] = {}
+
         for row in rows:
             try:
                 summary = json.loads(row["summary_json"])
@@ -930,3 +1201,794 @@ class AnalysisStore:
             )
         )
         return results[:safe_limit]
+
+    # ========================================================================
+    # Phase 32B: Security Analytics V2 Aggregation Methods
+    # ========================================================================
+
+    def get_analytics_summary(
+        self,
+        time_window: Optional[str] = DEFAULT_TIME_WINDOW,
+        repository_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Compute consolidated security analytics summary.
+
+        Observational only: Does NOT mutate state, gate decisions, or findings.
+        Returns:
+            total_analyses, total_findings, severity breakdown (critical, high, medium,
+            low, info), gate/review status distribution (allow, block, review),
+            active_suppressions, expired_suppressions, and time_window metadata.
+        """
+        window_name, cutoff_iso = parse_time_window(time_window)
+        target_repo = str(repository_id).strip().lower() if repository_id else None
+
+        with self._get_connection() as conn:
+            # Query analyses in time window
+            if cutoff_iso:
+                analysis_rows = conn.execute(
+                    "SELECT analysis_id, created_at, finding_count, summary_json FROM analyses WHERE created_at >= ? ORDER BY created_at DESC;",
+                    (cutoff_iso,),
+                ).fetchall()
+            else:
+                analysis_rows = conn.execute(
+                    "SELECT analysis_id, created_at, finding_count, summary_json FROM analyses ORDER BY created_at DESC;"
+                ).fetchall()
+
+            matching_analysis_ids = []
+            review_statuses = {"allow": 0, "block": 0, "review": 0, "unknown": 0}
+
+            for row in analysis_rows:
+                try:
+                    summary = json.loads(row["summary_json"])
+                except Exception:
+                    summary = {}
+
+                # Repository matching if repository_id is requested
+                if target_repo:
+                    repo_meta = summary.get("_repository")
+                    candidates = []
+                    if isinstance(repo_meta, dict):
+                        owner = str(repo_meta.get("owner", "") or "").lower()
+                        r_name = str(repo_meta.get("repository", "") or repo_meta.get("name", "") or "").lower()
+                        if owner and r_name:
+                            candidates.append(f"{owner}/{r_name}")
+                        if r_name:
+                            candidates.append(r_name)
+                    elif isinstance(repo_meta, str):
+                        candidates.append(repo_meta.lower())
+
+                    if not any(target_repo == c or target_repo in c for c in candidates if c):
+                        continue
+
+                matching_analysis_ids.append(row["analysis_id"])
+
+                rev_stat = str(summary.get("_review_status", "")).lower()
+                if rev_stat in review_statuses:
+                    review_statuses[rev_stat] += 1
+                else:
+                    review_statuses["unknown"] += 1
+
+            total_analyses = len(matching_analysis_ids)
+            severities = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+            total_findings = 0
+
+            if matching_analysis_ids:
+                # Query finding aggregates using parameterized chunking to stay well under SQLite parameter limits
+                chunk_size = 500
+                for i in range(0, len(matching_analysis_ids), chunk_size):
+                    chunk = matching_analysis_ids[i : i + chunk_size]
+                    placeholders = ",".join("?" for _ in chunk)
+                    f_rows = conn.execute(
+                        f"""
+                        SELECT LOWER(severity) AS sev, COUNT(*) AS cnt
+                        FROM findings
+                        WHERE analysis_id IN ({placeholders})
+                        GROUP BY LOWER(severity);
+                        """,
+                        chunk,
+                    ).fetchall()
+                    for f_row in f_rows:
+                        s_name = f_row["sev"]
+                        cnt = int(f_row["cnt"])
+                        if s_name in severities:
+                            severities[s_name] += cnt
+                        else:
+                            severities[s_name] = cnt
+                        total_findings += cnt
+
+            # Suppression statistics (active, expired derived at query-time)
+            fp_query = "SELECT status, expires_at FROM false_positives"
+            fp_params: List[Any] = []
+            fp_conditions = []
+            if target_repo:
+                fp_conditions.append("LOWER(repository_id) = ?")
+                fp_params.append(target_repo)
+            if cutoff_iso:
+                fp_conditions.append("created_at >= ?")
+                fp_params.append(cutoff_iso)
+
+            if fp_conditions:
+                fp_query += " WHERE " + " AND ".join(fp_conditions)
+
+            fp_rows = conn.execute(fp_query, tuple(fp_params)).fetchall()
+            active_suppressions = 0
+            expired_suppressions = 0
+            revoked_suppressions = 0
+
+            for fp in fp_rows:
+                status = str(fp["status"]).upper()
+                if status == "REVOKED":
+                    revoked_suppressions += 1
+                elif status == "ACTIVE":
+                    if is_suppression_active(status, fp["expires_at"]):
+                        active_suppressions += 1
+                    else:
+                        expired_suppressions += 1
+
+        return {
+            "time_window": window_name,
+            "cutoff_timestamp": cutoff_iso,
+            "repository_id": repository_id,
+            "total_analyses": total_analyses,
+            "total_findings": total_findings,
+            "severities": severities,
+            "review_status_distribution": review_statuses,
+            "suppressions": {
+                "active_count": active_suppressions,
+                "expired_count": expired_suppressions,
+                "revoked_count": revoked_suppressions,
+            },
+        }
+
+    def get_vulnerability_analytics(
+        self,
+        time_window: Optional[str] = DEFAULT_TIME_WINDOW,
+        repository_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Aggregate findings by category/vulnerability type with severity breakdown.
+
+        Deterministic ordering: finding_count DESC, critical_count DESC, high_count DESC, category ASC.
+        Bounded result set.
+        """
+        safe_limit = 20 if limit is None or int(limit) <= 0 else min(100, int(limit))
+        window_name, cutoff_iso = parse_time_window(time_window)
+        target_repo = str(repository_id).strip().lower() if repository_id else None
+
+        with self._get_connection() as conn:
+            # 1. Gather analysis_ids matching time window and optional repository
+            if cutoff_iso:
+                analysis_rows = conn.execute(
+                    "SELECT analysis_id, summary_json FROM analyses WHERE created_at >= ?;",
+                    (cutoff_iso,),
+                ).fetchall()
+            else:
+                analysis_rows = conn.execute(
+                    "SELECT analysis_id, summary_json FROM analyses;"
+                ).fetchall()
+
+            matching_analysis_ids = []
+            for row in analysis_rows:
+                if target_repo:
+                    try:
+                        summary = json.loads(row["summary_json"])
+                    except Exception:
+                        summary = {}
+                    repo_meta = summary.get("_repository")
+                    candidates = []
+                    if isinstance(repo_meta, dict):
+                        owner = str(repo_meta.get("owner", "") or "").lower()
+                        r_name = str(repo_meta.get("repository", "") or repo_meta.get("name", "") or "").lower()
+                        if owner and r_name:
+                            candidates.append(f"{owner}/{r_name}")
+                        if r_name:
+                            candidates.append(r_name)
+                    elif isinstance(repo_meta, str):
+                        candidates.append(repo_meta.lower())
+
+                    if not any(target_repo == c or target_repo in c for c in candidates if c):
+                        continue
+
+                matching_analysis_ids.append(row["analysis_id"])
+
+            if not matching_analysis_ids:
+                return []
+
+            # 2. Aggregate findings across matching analyses
+            # Group by category and compute counts per severity level
+            vuln_map: Dict[str, Dict[str, Any]] = {}
+            chunk_size = 500
+
+            for i in range(0, len(matching_analysis_ids), chunk_size):
+                chunk = matching_analysis_ids[i : i + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT
+                        category,
+                        LOWER(severity) AS sev,
+                        COUNT(*) AS cnt
+                    FROM findings
+                    WHERE analysis_id IN ({placeholders})
+                    GROUP BY category, LOWER(severity);
+                    """,
+                    chunk,
+                ).fetchall()
+
+                for r in rows:
+                    cat = str(r["category"] or "General Security")
+                    sev = str(r["sev"] or "unknown").lower()
+                    cnt = int(r["cnt"])
+
+                    if cat not in vuln_map:
+                        vuln_map[cat] = {
+                            "category": cat,
+                            "finding_count": 0,
+                            "critical_count": 0,
+                            "high_count": 0,
+                            "medium_count": 0,
+                            "low_count": 0,
+                            "info_count": 0,
+                        }
+
+                    entry = vuln_map[cat]
+                    entry["finding_count"] += cnt
+                    key = f"{sev}_count"
+                    if key in entry:
+                        entry[key] += cnt
+
+            results = list(vuln_map.values())
+            # Deterministic sorting
+            results.sort(
+                key=lambda v: (
+                    -v["finding_count"],
+                    -v["critical_count"],
+                    -v["high_count"],
+                    -v["medium_count"],
+                    v["category"].lower(),
+                )
+            )
+            return results[:safe_limit]
+
+    def get_repository_analytics(
+        self,
+        time_window: Optional[str] = DEFAULT_TIME_WINDOW,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Aggregate security risk and analysis metrics across repositories.
+
+        Deterministic ordering: critical_count DESC, high_count DESC, finding_count DESC,
+        analysis_count DESC, repository_id ASC.
+        Bounded result set.
+        """
+        safe_limit = 20 if limit is None or int(limit) <= 0 else min(100, int(limit))
+        window_name, cutoff_iso = parse_time_window(time_window)
+
+        with self._get_connection() as conn:
+            if cutoff_iso:
+                analysis_rows = conn.execute(
+                    "SELECT analysis_id, created_at, finding_count, summary_json FROM analyses WHERE created_at >= ? ORDER BY created_at DESC;",
+                    (cutoff_iso,),
+                ).fetchall()
+            else:
+                analysis_rows = conn.execute(
+                    "SELECT analysis_id, created_at, finding_count, summary_json FROM analyses ORDER BY created_at DESC;"
+                ).fetchall()
+
+            repo_stats: Dict[str, Dict[str, Any]] = {}
+            repo_analyses_map: Dict[str, List[str]] = {}
+
+            for row in analysis_rows:
+                try:
+                    summary = json.loads(row["summary_json"])
+                except Exception:
+                    summary = {}
+
+                repo_meta = summary.get("_repository")
+                repo_id = "default"
+                if isinstance(repo_meta, dict):
+                    owner = str(repo_meta.get("owner", "") or "").strip()
+                    r_name = str(repo_meta.get("repository", "") or repo_meta.get("name", "") or "").strip()
+                    if owner and r_name:
+                        repo_id = f"{owner}/{r_name}"
+                    elif r_name or owner:
+                        repo_id = r_name or owner
+                elif isinstance(repo_meta, str) and repo_meta.strip():
+                    repo_id = repo_meta.strip()
+
+                if repo_id not in repo_stats:
+                    repo_stats[repo_id] = {
+                        "repository_id": repo_id,
+                        "analysis_count": 0,
+                        "finding_count": 0,
+                        "critical_count": 0,
+                        "high_count": 0,
+                        "medium_count": 0,
+                        "low_count": 0,
+                        "info_count": 0,
+                        "review_status_distribution": {"allow": 0, "block": 0, "review": 0, "unknown": 0},
+                        "last_analysis_timestamp": str(row["created_at"]),
+                    }
+                    repo_analyses_map[repo_id] = []
+
+                entry = repo_stats[repo_id]
+                entry["analysis_count"] += 1
+                repo_analyses_map[repo_id].append(row["analysis_id"])
+
+                rev_stat = str(summary.get("_review_status", "")).lower()
+                if rev_stat in entry["review_status_distribution"]:
+                    entry["review_status_distribution"][rev_stat] += 1
+                else:
+                    entry["review_status_distribution"]["unknown"] += 1
+
+                if str(row["created_at"]) > entry["last_analysis_timestamp"]:
+                    entry["last_analysis_timestamp"] = str(row["created_at"])
+
+            # Accumulate findings counts from SQLite findings table per repository
+            for repo_id, a_ids in repo_analyses_map.items():
+                entry = repo_stats[repo_id]
+                chunk_size = 500
+                for i in range(0, len(a_ids), chunk_size):
+                    chunk = a_ids[i : i + chunk_size]
+                    placeholders = ",".join("?" for _ in chunk)
+                    f_rows = conn.execute(
+                        f"""
+                        SELECT LOWER(severity) AS sev, COUNT(*) AS cnt
+                        FROM findings
+                        WHERE analysis_id IN ({placeholders})
+                        GROUP BY LOWER(severity);
+                        """,
+                        chunk,
+                    ).fetchall()
+
+                    for f_row in f_rows:
+                        s_name = f_row["sev"]
+                        cnt = int(f_row["cnt"])
+                        entry["finding_count"] += cnt
+                        key = f"{s_name}_count"
+                        if key in entry:
+                            entry[key] += cnt
+
+            results = list(repo_stats.values())
+            results.sort(
+                key=lambda r: (
+                    -r["critical_count"],
+                    -r["high_count"],
+                    -r["finding_count"],
+                    -r["analysis_count"],
+                    r["repository_id"].lower(),
+                )
+            )
+            return results[:safe_limit]
+
+    def get_suppression_analytics(
+        self,
+        time_window: Optional[str] = DEFAULT_TIME_WINDOW,
+        repository_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Aggregate false-positive and suppression telemetry.
+
+        Observational only: NEVER mutates status from ACTIVE to EXPIRED in SQLite.
+        Expiration is derived at query-time.
+        """
+        window_name, cutoff_iso = parse_time_window(time_window)
+        target_repo = str(repository_id).strip().lower() if repository_id else None
+
+        with self._get_connection() as conn:
+            query = "SELECT * FROM false_positives"
+            params: List[Any] = []
+            conditions = []
+            if target_repo:
+                conditions.append("LOWER(repository_id) = ?")
+                params.append(target_repo)
+            if cutoff_iso:
+                conditions.append("created_at >= ?")
+                params.append(cutoff_iso)
+
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            query += " ORDER BY created_at DESC;"
+
+            rows = conn.execute(query, tuple(params)).fetchall()
+
+            total_suppressions = len(rows)
+            active_count = 0
+            expired_count = 0
+            revoked_count = 0
+            reason_distribution: Dict[str, int] = {}
+            version_distribution: Dict[str, int] = {"v1": 0, "v2": 0}
+
+            for row in rows:
+                status = str(row["status"]).upper()
+                if status == "REVOKED":
+                    revoked_count += 1
+                elif status == "ACTIVE":
+                    if is_suppression_active(status, row["expires_at"]):
+                        active_count += 1
+                    else:
+                        expired_count += 1
+
+                reason_code = str(row["reason_code"] or "FALSE_POSITIVE").strip()
+                reason_distribution[reason_code] = reason_distribution.get(reason_code, 0) + 1
+
+                v = int(row["fingerprint_version"] or 1)
+                v_key = f"v{v}"
+                version_distribution[v_key] = version_distribution.get(v_key, 0) + 1
+
+        return {
+            "time_window": window_name,
+            "cutoff_timestamp": cutoff_iso,
+            "repository_id": repository_id,
+            "total_suppressions": total_suppressions,
+            "active_count": active_count,
+            "expired_count": expired_count,
+            "revoked_count": revoked_count,
+            "reason_distribution": reason_distribution,
+            "fingerprint_version_distribution": version_distribution,
+        }
+
+    # ========================================================================
+    # Phase 33B: Webhook Delivery Idempotency Methods
+    # ========================================================================
+
+    def claim_delivery(
+        self,
+        delivery_id: str,
+        event_type: str,
+        now_iso: Optional[str] = None,
+        ttl_seconds: Optional[int] = None
+    ) -> bool:
+        """
+        Atomically claims a webhook delivery ID if unseen or expired.
+
+        Guarantees:
+        1. Runs bounded cleanup of expired entries (LIMIT 100) to prevent unbounded growth.
+        2. Deletes any expired record specifically matching this delivery_id.
+        3. Attempts an atomic INSERT with primary key constraint.
+
+        Returns:
+            True if successfully claimed, False if already claimed (unexpired duplicate).
+        """
+        clean_id = str(delivery_id or "").strip()
+        if not clean_id or clean_id.lower() in ("none", "unknown"):
+            return True
+
+        clean_event = str(event_type or "unknown").strip().lower()
+
+        from datetime import datetime, timezone, timedelta
+
+        if now_iso:
+            clean_now = str(now_iso).strip().replace("Z", "+00:00")
+            now_dt = datetime.fromisoformat(clean_now).astimezone(timezone.utc)
+        else:
+            now_dt = datetime.now(timezone.utc)
+
+        ttl = int(ttl_seconds) if ttl_seconds is not None and int(ttl_seconds) > 0 else DEFAULT_DELIVERY_TTL_SECONDS
+        exp_dt = now_dt + timedelta(seconds=ttl)
+
+        now_str = now_dt.isoformat()
+        exp_str = exp_dt.isoformat()
+
+        with self._get_connection() as conn:
+            # 1. Bounded cleanup of expired deliveries
+            conn.execute(
+                "DELETE FROM webhook_deliveries WHERE rowid IN ("
+                "SELECT rowid FROM webhook_deliveries WHERE expires_at <= ? LIMIT 100);",
+                (now_str,)
+            )
+            # 2. Reclaim this specific delivery_id if it exists but is expired
+            conn.execute(
+                "DELETE FROM webhook_deliveries WHERE delivery_id = ? AND expires_at <= ?;",
+                (clean_id, now_str)
+            )
+            # 3. Attempt atomic insert
+            try:
+                conn.execute(
+                    "INSERT INTO webhook_deliveries (delivery_id, event_type, created_at, expires_at) "
+                    "VALUES (?, ?, ?, ?);",
+                    (clean_id, clean_event, now_str, exp_str)
+                )
+                return True
+            except sqlite3.IntegrityError:
+                # Primary key constraint violation: already claimed and unexpired
+                return False
+
+    def is_delivery_claimed(self, delivery_id: str, now_iso: Optional[str] = None) -> bool:
+        """Check whether a delivery_id is currently claimed and unexpired."""
+        clean_id = str(delivery_id or "").strip()
+        if not clean_id or clean_id.lower() in ("none", "unknown"):
+            return False
+
+        from datetime import datetime, timezone
+
+        if now_iso:
+            clean_now = str(now_iso).strip().replace("Z", "+00:00")
+            now_dt = datetime.fromisoformat(clean_now).astimezone(timezone.utc)
+        else:
+            now_dt = datetime.now(timezone.utc)
+
+        now_str = now_dt.isoformat()
+
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM webhook_deliveries WHERE delivery_id = ? AND expires_at > ?;",
+                (clean_id, now_str)
+            ).fetchone()
+            return row is not None
+
+    def release_delivery(self, delivery_id: str) -> bool:
+        """Release a claimed delivery ID if unhandled processing error occurred."""
+        clean_id = str(delivery_id or "").strip()
+        if not clean_id or clean_id.lower() in ("none", "unknown"):
+            return False
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM webhook_deliveries WHERE delivery_id = ?;",
+                (clean_id,)
+            )
+            return cursor.rowcount > 0
+
+    def cleanup_expired_deliveries(self, now_iso: Optional[str] = None, limit: int = 100) -> int:
+        """Explicitly run bounded cleanup of expired webhook delivery records."""
+        from datetime import datetime, timezone
+
+        if now_iso:
+            clean_now = str(now_iso).strip().replace("Z", "+00:00")
+            now_dt = datetime.fromisoformat(clean_now).astimezone(timezone.utc)
+        else:
+            now_dt = datetime.now(timezone.utc)
+
+        now_str = now_dt.isoformat()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM webhook_deliveries WHERE rowid IN ("
+                "SELECT rowid FROM webhook_deliveries WHERE expires_at <= ? LIMIT ?);",
+                (now_str, max(1, limit))
+            )
+            return cursor.rowcount
+
+    # =========================================================================
+    # Phase 33C: Commit-Level Analysis Idempotency & PR Persistence Methods
+    # =========================================================================
+
+    def get_pr_analysis_by_commit(
+        self,
+        owner: str,
+        repository: str,
+        pr_number: Any,
+        head_sha: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Safely and deterministically retrieve completed PR analysis for an exact commit.
+
+        Uses indexed exact query against (owner, repository, pr_number, head_sha).
+        Returns None if missing, incomplete, failed, or historical without explicit PR identity.
+        """
+        try:
+            clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
+                owner, repository, pr_number, head_sha
+            )
+        except Exception:
+            return None
+
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT analysis_id FROM analyses
+                WHERE owner = ? AND repository = ? AND pr_number = ? AND head_sha = ?
+                  AND status IN ('success', 'completed')
+                ORDER BY created_at DESC
+                LIMIT 1;
+                """,
+                (clean_owner, clean_repo, clean_pr, clean_head),
+            ).fetchone()
+
+            if not row:
+                return None
+
+            analysis_id = row["analysis_id"]
+
+        return self.get_analysis(analysis_id)
+
+    def reserve_pr_commit_analysis(
+        self,
+        owner: str,
+        repository: str,
+        pr_number: Any,
+        head_sha: str,
+        ttl_seconds: int = DEFAULT_COMMIT_RESERVATION_TTL_SECONDS,
+        now_iso: Optional[str] = None,
+    ) -> Tuple[bool, str, Optional[str]]:
+        """Atomically reserve execution rights for an exact PR commit analysis.
+
+        Guarantees only one worker acquires reservation.
+        Returns:
+            (acquired: bool, reason: str, analysis_id: Optional[str])
+            - (True, "reserved", None): Successfully reserved analysis ownership.
+            - (False, "already_completed", analysis_id): A completed analysis already exists.
+            - (False, "in_progress", None): Another worker currently has active in-progress reservation.
+        """
+        try:
+            clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
+                owner, repository, pr_number, head_sha
+            )
+        except Exception as e:
+            return False, f"invalid_identity_{type(e).__name__}", None
+
+        commit_key = f"{clean_owner.lower()}/{clean_repo.lower()}:{clean_pr}:{clean_head.lower()}"
+
+        from datetime import datetime, timezone, timedelta
+
+        if now_iso:
+            clean_now = str(now_iso).strip().replace("Z", "+00:00")
+            now_dt = datetime.fromisoformat(clean_now).astimezone(timezone.utc)
+        else:
+            now_dt = datetime.now(timezone.utc)
+
+        now_str = now_dt.isoformat()
+        exp_dt = now_dt + timedelta(seconds=max(10, int(ttl_seconds)))
+        exp_str = exp_dt.isoformat()
+
+        with self._get_connection() as conn:
+            # 1. Check if completed analysis already exists in analyses
+            existing = conn.execute(
+                """
+                SELECT analysis_id FROM analyses
+                WHERE owner = ? AND repository = ? AND pr_number = ? AND head_sha = ?
+                  AND status IN ('success', 'completed')
+                ORDER BY created_at DESC
+                LIMIT 1;
+                """,
+                (clean_owner, clean_repo, clean_pr, clean_head)
+            ).fetchone()
+
+            if existing:
+                return False, "already_completed", existing["analysis_id"]
+
+            # 2. Check existing reservation in pr_commit_reservations
+            res_row = conn.execute(
+                "SELECT status, analysis_id, expires_at FROM pr_commit_reservations WHERE commit_key = ?;",
+                (commit_key,)
+            ).fetchone()
+
+            if res_row:
+                status = res_row["status"]
+                res_exp = res_row["expires_at"]
+                res_aid = res_row["analysis_id"]
+
+                # If marked completed, verify if analysis actually exists
+                if status == "completed":
+                    if res_aid:
+                        a_row = conn.execute(
+                            "SELECT analysis_id FROM analyses WHERE analysis_id = ? AND status IN ('success', 'completed');",
+                            (res_aid,)
+                        ).fetchone()
+                        if a_row:
+                            return False, "already_completed", res_aid
+                    # Completed reservation but missing analysis record -> allow retry
+                    conn.execute("DELETE FROM pr_commit_reservations WHERE commit_key = ?;", (commit_key,))
+
+                elif status == "in_progress":
+                    # Check expiration
+                    try:
+                        clean_exp = str(res_exp).strip().replace("Z", "+00:00")
+                        exp_time = datetime.fromisoformat(clean_exp).astimezone(timezone.utc)
+                        if now_dt < exp_time:
+                            # Active unexpired in-progress reservation
+                            return False, "in_progress", None
+                        else:
+                            # Stale reservation from crashed worker -> reclaim
+                            conn.execute("DELETE FROM pr_commit_reservations WHERE commit_key = ?;", (commit_key,))
+                    except Exception:
+                        conn.execute("DELETE FROM pr_commit_reservations WHERE commit_key = ?;", (commit_key,))
+                else:
+                    # Failed or unknown status -> allow retry
+                    conn.execute("DELETE FROM pr_commit_reservations WHERE commit_key = ?;", (commit_key,))
+
+            # 3. Clean bounded expired reservations
+            conn.execute(
+                "DELETE FROM pr_commit_reservations WHERE expires_at <= ? AND status = 'in_progress';",
+                (now_str,)
+            )
+
+            # 4. Atomic INSERT to claim reservation
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO pr_commit_reservations (
+                        commit_key, owner, repository, pr_number, head_sha, status, analysis_id, created_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, 'in_progress', NULL, ?, ?);
+                    """,
+                    (commit_key, clean_owner, clean_repo, clean_pr, clean_head, now_str, exp_str)
+                )
+                return True, "reserved", None
+            except sqlite3.IntegrityError:
+                # Concurrent worker won the race
+                row = conn.execute(
+                    "SELECT status, analysis_id FROM pr_commit_reservations WHERE commit_key = ?;",
+                    (commit_key,)
+                ).fetchone()
+                if row and row["status"] == "completed":
+                    return False, "already_completed", row["analysis_id"]
+                return False, "in_progress", None
+
+    def complete_pr_commit_reservation(
+        self,
+        owner: str,
+        repository: str,
+        pr_number: Any,
+        head_sha: str,
+        analysis_id: Optional[str] = None,
+    ) -> bool:
+        """Mark commit reservation as completed upon successful analysis report persistence."""
+        try:
+            clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
+                owner, repository, pr_number, head_sha
+            )
+        except Exception:
+            return False
+
+        commit_key = f"{clean_owner.lower()}/{clean_repo.lower()}:{clean_pr}:{clean_head.lower()}"
+        now_str = get_utc_now_iso()
+
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO pr_commit_reservations (
+                    commit_key, owner, repository, pr_number, head_sha, status, analysis_id, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, '9999-12-31T23:59:59+00:00')
+                ON CONFLICT(commit_key) DO UPDATE SET
+                    status = 'completed',
+                    analysis_id = COALESCE(excluded.analysis_id, pr_commit_reservations.analysis_id),
+                    expires_at = '9999-12-31T23:59:59+00:00';
+                """,
+                (commit_key, clean_owner, clean_repo, clean_pr, clean_head, str(analysis_id or ""), now_str)
+            )
+            return True
+
+    def release_pr_commit_reservation(
+        self,
+        owner: str,
+        repository: str,
+        pr_number: Any,
+        head_sha: str,
+    ) -> bool:
+        """Release in-progress commit reservation on failure or exception to allow retry."""
+        try:
+            clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
+                owner, repository, pr_number, head_sha
+            )
+        except Exception:
+            return False
+
+        commit_key = f"{clean_owner.lower()}/{clean_repo.lower()}:{clean_pr}:{clean_head.lower()}"
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM pr_commit_reservations WHERE commit_key = ? AND status = 'in_progress';",
+                (commit_key,)
+            )
+            return cursor.rowcount > 0
+
+    def cleanup_expired_commit_reservations(self, now_iso: Optional[str] = None, limit: int = 100) -> int:
+        """Bounded cleanup of expired in-progress commit reservations."""
+        from datetime import datetime, timezone
+
+        if now_iso:
+            clean_now = str(now_iso).strip().replace("Z", "+00:00")
+            now_dt = datetime.fromisoformat(clean_now).astimezone(timezone.utc)
+        else:
+            now_dt = datetime.now(timezone.utc)
+
+        now_str = now_dt.isoformat()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM pr_commit_reservations WHERE rowid IN ("
+                "SELECT rowid FROM pr_commit_reservations WHERE expires_at <= ? AND status = 'in_progress' LIMIT ?);",
+                (now_str, max(1, limit))
+            )
+            return cursor.rowcount
+
+

@@ -10,6 +10,10 @@
 venv
 ENV/
 env/
+**/.venv
+**/venv
+**/ENV/
+**/env/
 
 # Node modules & Frontend build outputs
 node_modules
@@ -29,8 +33,12 @@ htmlcov/
 # Environment variables & secrets
 .env
 .env.*
+**/.env
+**/.env.*
 secrets/
+**/secrets/
 credentials/
+**/credentials/
 *.pem
 *.key
 

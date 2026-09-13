@@ -111,7 +111,7 @@ def analyze_source_code(
     try:
         normalized_evidence = normalize_security_evidence(clean_source, file_path="<source>")
         security_evidence = normalized_evidence.get("security_evidence", [])
-        ast_docs = prepare_ast_documents_for_rag(clean_source, file_path="<source>")
+        ast_docs = prepare_ast_documents_for_rag(clean_source, file_path="<source>", normalized_evidence=normalized_evidence)
 
         # Step 6B: Ingest AST Documents into ChromaDB
         if ast_docs:

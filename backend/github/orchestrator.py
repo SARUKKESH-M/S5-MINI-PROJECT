@@ -5,8 +5,9 @@ Orchestrates GitHub webhook processing by linking signature verification, PR met
 CodeSentinel static analysis pipeline, Step 6O Production Reports, Check Runs, Commit Statuses, and PR Security Comments.
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Optional, Tuple
 import uuid
-from typing import Any, Dict, Optional
 
 try:
     from backend.github.client import GitHubClient
@@ -29,6 +30,11 @@ try:
     from backend.analysis.finding_aggregator import aggregate_and_deduplicate_findings
     from backend.analysis.scope import should_exclude_path
     from ast_engine.security_analyzer import analyze_security_structure
+    from backend.github.webhook import (
+        claim_webhook_delivery,
+        release_webhook_delivery,
+        release_pr_commit_reservation,
+    )
     from backend.notifications.slack import send_slack_pr_alert_sync
 except ImportError:
     from github.client import GitHubClient
@@ -52,6 +58,16 @@ except ImportError:
     from analysis.scope import should_exclude_path
     from ast_engine.security_analyzer import analyze_security_structure
     try:
+        from github.webhook import (
+            claim_webhook_delivery,
+            release_webhook_delivery,
+            release_pr_commit_reservation,
+        )
+    except ImportError:
+        claim_webhook_delivery = lambda *args, **kwargs: True
+        release_webhook_delivery = lambda *args, **kwargs: False
+        release_pr_commit_reservation = lambda *args, **kwargs: False
+    try:
         from notifications.slack import send_slack_pr_alert_sync
     except ImportError:
         send_slack_pr_alert_sync = None
@@ -68,13 +84,35 @@ import base64
 import os
 
 
+def _get_analysis_store(db_path: Optional[str] = None) -> Optional[Any]:
+    """Resolves AnalysisStore on-demand and instantiates with given db_path."""
+    global AnalysisStore
+    if AnalysisStore is None:
+        try:
+            from backend.analysis.storage.store import AnalysisStore as _StoreCls
+            AnalysisStore = _StoreCls
+        except ImportError:
+            try:
+                from analysis.storage.store import AnalysisStore as _StoreCls
+                AnalysisStore = _StoreCls
+            except ImportError:
+                AnalysisStore = None
+    if AnalysisStore is not None:
+        try:
+            return AnalysisStore(db_path=db_path)
+        except Exception:
+            return None
+    return None
+
+
 def _safely_persist_pr_analysis(report: Dict[str, Any], db_path: Optional[str] = None) -> None:
     """Safely persist PR analysis record into SQLite store without exposing exceptions."""
-    if AnalysisStore is None or not isinstance(report, dict):
+    if not isinstance(report, dict):
         return
     try:
-        store = AnalysisStore(db_path=db_path)
-        store.save_analysis(report)
+        store = _get_analysis_store(db_path=db_path)
+        if store is not None:
+            store.save_analysis(report)
     except Exception:
         pass
 
@@ -109,6 +147,66 @@ def _fetch_source_code_for_pr(
     return None
 
 
+DEFAULT_MAX_CONCURRENT_GITHUB_FETCHES = 4
+
+
+def _fetch_pr_files_contents_bounded(
+    owner: str,
+    repository: str,
+    head_sha: str,
+    candidates: List[Tuple[int, str]],
+    client: Optional[GitHubClient] = None,
+    max_workers: int = DEFAULT_MAX_CONCURRENT_GITHUB_FETCHES
+) -> Dict[int, Optional[str]]:
+    """
+    Fetches full source contents for multiple changed files using bounded thread-level concurrency.
+
+    Guarantees:
+    - Bounded worker limit: min(len(candidates), max_workers), defaulting to 4.
+    - Reuses the existing pooled GitHubClient (thread-safe httpx.Client).
+    - Preserves deterministic output mapping by indexing results by original changed-file index.
+    - Preserves existing failure semantics: individual failures return None and do not affect other files.
+    - Zero nested executors and zero per-worker client instances.
+    """
+    if not candidates:
+        return {}
+
+    effective_workers = max(1, min(len(candidates), int(max_workers)))
+    if len(candidates) == 1 or effective_workers <= 1:
+        return {
+            idx: _fetch_source_code_for_pr(
+                owner=owner,
+                repository=repository,
+                filename=fn,
+                head_sha=head_sha,
+                client=client
+            )
+            for idx, fn in candidates
+        }
+
+    results: Dict[int, Optional[str]] = {}
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        future_to_idx = {
+            executor.submit(
+                _fetch_source_code_for_pr,
+                owner=owner,
+                repository=repository,
+                filename=fn,
+                head_sha=head_sha,
+                client=client
+            ): idx
+            for idx, fn in candidates
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+            except Exception:
+                results[idx] = None
+
+    return results
+
+
 def _generate_pr_analysis_report(
     owner: str,
     repository: str,
@@ -117,6 +215,7 @@ def _generate_pr_analysis_report(
     changed_files: list,
     client: Optional[GitHubClient] = None,
     author: Optional[str] = None,
+    base_sha: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generates a Step 6O Production Report for a PR snapshot using CodeSentinel's
@@ -141,7 +240,33 @@ def _generate_pr_analysis_report(
     skipped_files = 0
     findings = []
 
-    for f_item in changed_files:
+    # Phase 35D: Pre-identify candidates for bounded concurrent remote content fetching
+    fetch_candidates: List[Tuple[int, str]] = []
+    for idx, f_item in enumerate(changed_files):
+        fn = getattr(f_item, "filename", None) or (f_item.get("filename") if isinstance(f_item, dict) else "")
+        st = getattr(f_item, "status", None) or (f_item.get("status") if isinstance(f_item, dict) else "modified")
+        if not fn or st == "removed" or should_exclude_path(fn):
+            continue
+        if fn.endswith(".py") or fn.endswith(".js") or fn.endswith(".jsx"):
+            fetch_candidates.append((idx, fn))
+
+    max_workers = DEFAULT_MAX_CONCURRENT_GITHUB_FETCHES
+    try:
+        from backend.app.core.config import settings
+        max_workers = getattr(settings, "MAX_CONCURRENT_GITHUB_FETCHES", DEFAULT_MAX_CONCURRENT_GITHUB_FETCHES)
+    except Exception:
+        pass
+
+    prefetched_contents = _fetch_pr_files_contents_bounded(
+        owner=owner,
+        repository=repository,
+        head_sha=head_sha,
+        candidates=fetch_candidates,
+        client=client,
+        max_workers=max_workers
+    ) if fetch_candidates else {}
+
+    for idx, f_item in enumerate(changed_files):
         filename = getattr(f_item, "filename", None) or (f_item.get("filename") if isinstance(f_item, dict) else "")
         patch = getattr(f_item, "patch", None) or (f_item.get("patch") if isinstance(f_item, dict) else None)
         status = getattr(f_item, "status", None) or (f_item.get("status") if isinstance(f_item, dict) else "modified")
@@ -161,13 +286,16 @@ def _generate_pr_analysis_report(
         is_js = filename.endswith(".js") or filename.endswith(".jsx")
 
         if is_python or is_js:
-            source_code = _fetch_source_code_for_pr(
-                owner=owner,
-                repository=repository,
-                filename=filename,
-                head_sha=head_sha,
-                client=client
-            )
+            if idx in prefetched_contents:
+                source_code = prefetched_contents[idx]
+            else:
+                source_code = _fetch_source_code_for_pr(
+                    owner=owner,
+                    repository=repository,
+                    filename=filename,
+                    head_sha=head_sha,
+                    client=client
+                )
 
         if source_code is not None:
             # 1. Parse unified diff to obtain changed lines
@@ -232,8 +360,12 @@ def _generate_pr_analysis_report(
         "owner": owner,
         "repository": repository,
         "branch": f"pr/{pr_number}",
-        "path": "."
+        "path": ".",
+        "pr_number": pr_number,
+        "head_sha": head_sha,
     }
+    if base_sha:
+        repo_dict["base_sha"] = base_sha
     if clean_author:
         repo_dict["author"] = clean_author
 
@@ -243,8 +375,14 @@ def _generate_pr_analysis_report(
         "repository": repo_dict,
         "summary": summary,
         "findings": deduped_findings,
-        "analysis_version": "1.0"
+        "analysis_version": "1.0",
+        "owner": owner,
+        "repository_id": repository,
+        "pr_number": pr_number,
+        "head_sha": head_sha,
     }
+    if base_sha:
+        raw_record["base_sha"] = base_sha
     if clean_author:
         raw_record["author"] = clean_author
 
@@ -255,7 +393,9 @@ def orchestrate_webhook_event(
     event_type: str,
     delivery_id: str,
     payload: Dict[str, Any],
-    client: Optional[GitHubClient] = None
+    client: Optional[GitHubClient] = None,
+    db_path: Optional[str] = None,
+    review_mode: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Orchestrates processing of a validated GitHub webhook event.
@@ -265,10 +405,13 @@ def orchestrate_webhook_event(
         delivery_id: Unique GitHub webhook delivery GUID.
         payload: Parsed JSON payload dictionary.
         client: Optional pre-configured GitHubClient instance.
+        db_path: Optional SQLite database file path.
+        review_mode: Optional review mode override ('comment' or 'enforce').
 
     Returns:
         Structured orchestration execution result dictionary.
     """
+
     clean_event = str(event_type or "").strip().lower()
     api_client = client or GitHubClient()
 
@@ -301,99 +444,212 @@ def orchestrate_webhook_event(
         clean_pr_num = validate_pr_number(int(raw_pr_num))
         clean_head_sha = validate_commit_sha(str(raw_head_sha))
 
-        # Acquire PR snapshot metadata & changed files
-        snapshot = acquire_pull_request(clean_owner, clean_repo, clean_pr_num, client=api_client)
+        raw_base_sha = pr_obj.get("base", {}).get("sha") if isinstance(pr_obj.get("base"), dict) else None
+        clean_base_sha = None
+        if raw_base_sha:
+            try:
+                clean_base_sha = validate_commit_sha(str(raw_base_sha))
+            except Exception:
+                clean_base_sha = None
 
-        # Extract PR author for intelligence and notification
-        raw_user = pr_obj.get("user", {}) if isinstance(pr_obj, dict) else {}
-        pr_author = raw_user.get("login", "unknown") if isinstance(raw_user, dict) else "unknown"
+        # 1. Atomically claim delivery ID before expensive PR acquisition and analysis (Phase 33B)
+        claimed = claim_webhook_delivery(delivery_id, "pull_request", db_path=db_path)
+        if not claimed:
+            return {
+                "status": "duplicate",
+                "event": "pull_request",
+                "delivery": delivery_id,
+                "delivery_id": delivery_id,
+                "reason": "delivery_already_processed"
+            }
 
-        # Execute CodeSentinel static security analysis pipeline to generate Step 6O Report
-        report = _generate_pr_analysis_report(
-            owner=clean_owner,
-            repository=clean_repo,
-            pr_number=clean_pr_num,
-            head_sha=clean_head_sha,
-            changed_files=snapshot.changed_files,
-            client=api_client,
-            author=pr_author if pr_author != "unknown" else None
-        )
+        # 2. Check commit-level idempotency and reserve commit analysis (Phase 33C)
+        store = _get_analysis_store(db_path=db_path)
 
-        # Safely persist PR analysis into SQLite store for developer and repository intelligence
-        _safely_persist_pr_analysis(report)
+        if store is not None:
+            existing_report = store.get_pr_analysis_by_commit(
+                owner=clean_owner,
+                repository=clean_repo,
+                pr_number=clean_pr_num,
+                head_sha=clean_head_sha
+            )
+            if existing_report is not None:
+                # Commit already successfully analyzed: short-circuit expensive operations
+                return {
+                    "status": "already_analyzed",
+                    "event": "pull_request",
+                    "delivery": delivery_id,
+                    "delivery_id": delivery_id,
+                    "owner": clean_owner,
+                    "repository": clean_repo,
+                    "pr_number": clean_pr_num,
+                    "head_sha": clean_head_sha,
+                    "review_status": existing_report.get("review_status", "allow"),
+                    "analysis_id": existing_report.get("analysis_id"),
+                    "reason": "commit_already_analyzed"
+                }
 
-        # Publish GitHub Check Run & Commit Status
-        status_pub_res = publish_step_6o_report_status(
-            owner=clean_owner,
-            repository=clean_repo,
-            head_sha=clean_head_sha,
-            report=report,
-            client=api_client
-        )
+            reserved, res_reason, res_analysis_id = store.reserve_pr_commit_analysis(
+                owner=clean_owner,
+                repository=clean_repo,
+                pr_number=clean_pr_num,
+                head_sha=clean_head_sha
+            )
+            if not reserved:
+                if res_reason == "already_completed":
+                    cached_report = store.get_analysis(res_analysis_id) if res_analysis_id else None
+                    review_status = cached_report.get("review_status", "allow") if cached_report else "allow"
+                    return {
+                        "status": "already_analyzed",
+                        "event": "pull_request",
+                        "delivery": delivery_id,
+                        "delivery_id": delivery_id,
+                        "owner": clean_owner,
+                        "repository": clean_repo,
+                        "pr_number": clean_pr_num,
+                        "head_sha": clean_head_sha,
+                        "review_status": review_status,
+                        "analysis_id": res_analysis_id,
+                        "reason": "commit_already_analyzed"
+                    }
+                elif res_reason == "in_progress":
+                    return {
+                        "status": "in_progress",
+                        "event": "pull_request",
+                        "delivery": delivery_id,
+                        "delivery_id": delivery_id,
+                        "owner": clean_owner,
+                        "repository": clean_repo,
+                        "pr_number": clean_pr_num,
+                        "head_sha": clean_head_sha,
+                        "reason": "analysis_in_progress"
+                    }
 
-        # Post / update PR Security Comment
-        comment_res = post_pr_security_comment(
-            owner=clean_owner,
-            repository=clean_repo,
-            pr_number=clean_pr_num,
-            report=report,
-            client=api_client
-        )
-
-        # Post / update inline PR review comments on modified lines
-        inline_comment_res = None
         try:
-            inline_comment_res = post_pr_inline_review_comments(
+            # Acquire PR snapshot metadata & changed files
+            snapshot = acquire_pull_request(clean_owner, clean_repo, clean_pr_num, client=api_client)
+
+            # Extract PR author for intelligence and notification
+            raw_user = pr_obj.get("user", {}) if isinstance(pr_obj, dict) else {}
+            pr_author = raw_user.get("login", "unknown") if isinstance(raw_user, dict) else "unknown"
+
+            # Execute CodeSentinel static security analysis pipeline to generate Step 6O Report
+            report = _generate_pr_analysis_report(
                 owner=clean_owner,
                 repository=clean_repo,
                 pr_number=clean_pr_num,
                 head_sha=clean_head_sha,
-                report=report,
                 changed_files=snapshot.changed_files,
-                client=api_client
+                client=api_client,
+                author=pr_author if pr_author != "unknown" else None,
+                base_sha=clean_base_sha
             )
-        except Exception as inline_err:
-            inline_comment_res = {
-                "status": "skipped",
-                "reason": f"unexpected_inline_error_{type(inline_err).__name__}",
-                "comments_count": 0
-            }
 
-        # Dispatch optional Slack notification (isolated side-effect)
-        slack_res = None
-        if send_slack_pr_alert_sync is not None:
+            # Attach explicit PR identity fields to report before persistence
+            report["owner"] = clean_owner
+            report["repository_id"] = clean_repo
+            report["pr_number"] = clean_pr_num
+            report["head_sha"] = clean_head_sha
+            if clean_base_sha:
+                report["base_sha"] = clean_base_sha
+            if pr_author != "unknown":
+                report["author"] = pr_author
+
+            # Safely persist PR analysis into SQLite store for developer and repository intelligence
+            _safely_persist_pr_analysis(report, db_path=db_path)
+
+            # Publish GitHub Check Run & Commit Status
+            status_pub_res = {}
             try:
-                pr_title = pr_obj.get("title", "") if isinstance(pr_obj, dict) else f"PR #{clean_pr_num}"
-                raw_url = pr_obj.get("html_url") if isinstance(pr_obj, dict) else None
-                pr_url = raw_url if raw_url and str(raw_url).startswith("https://") else f"https://github.com/{clean_owner}/{clean_repo}/pull/{clean_pr_num}"
-                slack_res = send_slack_pr_alert_sync(
+                status_pub_res = publish_step_6o_report_status(
+                    owner=clean_owner,
+                    repository=clean_repo,
+                    head_sha=clean_head_sha,
                     report=report,
-                    pr_number=clean_pr_num,
-                    pr_title=pr_title or f"PR #{clean_pr_num}",
-                    pr_author=pr_author,
-                    repo_full_name=f"{clean_owner}/{clean_repo}",
-                    pr_url=pr_url
+                    client=api_client
                 )
-            except Exception:
-                slack_res = {"status": "failed", "reason": "unexpected_error"}
+            except Exception as pub_err:
+                status_pub_res = {
+                    "status": "failed",
+                    "reason": f"status_publishing_error_{type(pub_err).__name__}"
+                }
 
-        return {
-            "status": "success",
-            "event": "pull_request",
-            "delivery": delivery_id,
-            "delivery_id": delivery_id,
-            "owner": clean_owner,
-            "repository": clean_repo,
-            "pr_number": clean_pr_num,
-            "head_sha": clean_head_sha,
-            "review_status": report.get("review_status", "allow"),
-            "analysis_id": report.get("analysis_id"),
-            "check_run": status_pub_res.get("check_run"),
-            "commit_status": status_pub_res.get("commit_status"),
-            "comment": comment_res,
-            "inline_comments": inline_comment_res,
-            "slack_notification": slack_res
-        }
+            # Post / update PR Security Comment
+            comment_res = {}
+            try:
+                comment_res = post_pr_security_comment(
+                    owner=clean_owner,
+                    repository=clean_repo,
+                    pr_number=clean_pr_num,
+                    report=report,
+                    client=api_client
+                )
+            except Exception as comment_err:
+                comment_res = {
+                    "status": "failed",
+                    "reason": f"comment_error_{type(comment_err).__name__}"
+                }
+
+            # Post / update inline PR review comments on modified lines
+            inline_comment_res = None
+            try:
+                inline_comment_res = post_pr_inline_review_comments(
+                    owner=clean_owner,
+                    repository=clean_repo,
+                    pr_number=clean_pr_num,
+                    head_sha=clean_head_sha,
+                    report=report,
+                    changed_files=snapshot.changed_files,
+                    client=api_client,
+                    review_mode=review_mode
+                )
+            except Exception as inline_err:
+                inline_comment_res = {
+                    "status": "skipped",
+                    "reason": f"unexpected_inline_error_{type(inline_err).__name__}",
+                    "comments_count": 0
+                }
+
+
+            # Dispatch optional Slack notification (isolated side-effect)
+            slack_res = None
+            if send_slack_pr_alert_sync is not None:
+                try:
+                    pr_title = pr_obj.get("title", "") if isinstance(pr_obj, dict) else f"PR #{clean_pr_num}"
+                    raw_url = pr_obj.get("html_url") if isinstance(pr_obj, dict) else None
+                    pr_url = raw_url if raw_url and str(raw_url).startswith("https://") else f"https://github.com/{clean_owner}/{clean_repo}/pull/{clean_pr_num}"
+                    slack_res = send_slack_pr_alert_sync(
+                        report=report,
+                        pr_number=clean_pr_num,
+                        pr_title=pr_title or f"PR #{clean_pr_num}",
+                        pr_author=pr_author,
+                        repo_full_name=f"{clean_owner}/{clean_repo}",
+                        pr_url=pr_url
+                    )
+                except Exception:
+                    slack_res = {"status": "failed", "reason": "unexpected_error"}
+
+            return {
+                "status": "success",
+                "event": "pull_request",
+                "delivery": delivery_id,
+                "delivery_id": delivery_id,
+                "owner": clean_owner,
+                "repository": clean_repo,
+                "pr_number": clean_pr_num,
+                "head_sha": clean_head_sha,
+                "review_status": report.get("review_status", "allow"),
+                "analysis_id": report.get("analysis_id"),
+                "check_run": status_pub_res.get("check_run"),
+                "commit_status": status_pub_res.get("commit_status"),
+                "comment": comment_res,
+                "inline_comments": inline_comment_res,
+                "slack_notification": slack_res
+            }
+        except Exception:
+            release_webhook_delivery(delivery_id, db_path=db_path)
+            release_pr_commit_reservation(clean_owner, clean_repo, clean_pr_num, clean_head_sha, db_path=db_path)
+            raise
 
     # -----------------------------------------------------------------
     # 2. PUSH EVENT SAFE ACKNOWLEDGEMENT
@@ -407,6 +663,16 @@ def orchestrate_webhook_event(
         clean_owner = validate_webhook_owner(str(raw_owner)) if raw_owner else "unknown"
         clean_repo = validate_webhook_repo(str(raw_repo)) if raw_repo else "unknown"
         clean_sha = validate_commit_sha(str(raw_sha)) if raw_sha and len(str(raw_sha)) == 40 else None
+
+        claimed = claim_webhook_delivery(delivery_id, "push", db_path=db_path)
+        if not claimed:
+            return {
+                "status": "duplicate",
+                "event": "push",
+                "delivery": delivery_id,
+                "delivery_id": delivery_id,
+                "reason": "delivery_already_processed"
+            }
 
         return {
             "status": "acknowledged",

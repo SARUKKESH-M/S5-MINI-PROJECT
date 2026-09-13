@@ -200,3 +200,55 @@ def create_suppression_record(
         "reason_code": str(reason_code).strip() if reason_code else "FALSE_POSITIVE",
         "expires_at": str(expires_at).strip() if expires_at else None,
     }
+
+
+# ============================================================================
+# Phase 32: Security Analytics V2 Contracts and Time-Window Helpers
+# ============================================================================
+
+VALID_TIME_WINDOWS = {"7d", "30d", "90d", "all"}
+DEFAULT_TIME_WINDOW = "30d"
+
+
+def parse_time_window(
+    time_window: Optional[str] = DEFAULT_TIME_WINDOW,
+    default: str = DEFAULT_TIME_WINDOW,
+) -> Tuple[str, Optional[str]]:
+    """Validate and resolve time window into (normalized_window, utc_cutoff_iso_or_none).
+
+    Supported windows: '7d', '30d', '90d', 'all'.
+    Defaults to '30d'.
+    Returns:
+        (window_name, cutoff_timestamp_iso) where cutoff_timestamp_iso is None for 'all'.
+    Raises:
+        ValueError: If time_window is invalid.
+    """
+    raw = str(time_window if time_window is not None else default).strip().lower()
+    if not raw:
+        raw = default
+
+    if raw not in VALID_TIME_WINDOWS:
+        raise ValueError(
+            f"Invalid time_window '{raw}'. Supported values: {sorted(list(VALID_TIME_WINDOWS))}."
+        )
+
+    if raw == "all":
+        return "all", None
+
+    days_map = {"7d": 7, "30d": 30, "90d": 90}
+    days = days_map[raw]
+    from datetime import timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    return raw, cutoff.isoformat()
+
+
+# ============================================================================
+# Phase 33B: Webhook Idempotency Contracts
+# ============================================================================
+DEFAULT_DELIVERY_TTL_SECONDS = 86400  # 24 hours
+
+
+# ============================================================================
+# Phase 33C: Commit-Level Analysis Idempotency & PR Persistence Contracts
+# ============================================================================
+DEFAULT_COMMIT_RESERVATION_TTL_SECONDS = 300  # 5 minutes bounded recovery

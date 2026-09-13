@@ -10,6 +10,7 @@ import re
 from typing import Any, Dict, List, Optional, Set
 
 try:
+    from backend.app.core.config import settings
     from backend.github.client import GitHubClient
     from backend.github.validator import (
         validate_webhook_owner,
@@ -26,6 +27,10 @@ try:
     )
     from backend.analysis.diff_scope import parse_unified_diff
 except ImportError:
+    try:
+        from app.core.config import settings
+    except ImportError:
+        settings = None
     from github.client import GitHubClient
     from github.validator import (
         validate_webhook_owner,
@@ -41,6 +46,16 @@ except ImportError:
         GitHubRateLimitError
     )
     from analysis.diff_scope import parse_unified_diff
+
+REVIEW_MARKER_PREFIX = "<!-- codesentinel-review:"
+REVIEW_MARKER_SUFFIX = " -->"
+
+VALID_REVIEW_MODES = {"comment", "enforce"}
+VALID_REVIEW_EVENTS = {"COMMENT", "APPROVE", "REQUEST_CHANGES"}
+
+DEFAULT_MAX_PAGINATION_PAGES = 10
+DEFAULT_PAGINATION_PER_PAGE = 100
+
 
 
 COMMENT_MARKER = "<!-- codesentinel-security-analysis -->"
@@ -140,11 +155,13 @@ def post_pr_security_comment(
     repository: str,
     pr_number: int,
     report: Dict[str, Any],
-    client: Optional[GitHubClient] = None
+    client: Optional[GitHubClient] = None,
+    max_pages: int = DEFAULT_MAX_PAGINATION_PAGES,
+    per_page: int = DEFAULT_PAGINATION_PER_PAGE
 ) -> Dict[str, Any]:
     """
     Posts or updates a GitHub Pull Request security comment.
-    Searches for an existing comment with `COMMENT_MARKER` and updates it if present.
+    Searches for an existing comment with `COMMENT_MARKER` using bounded pagination and updates it if present.
 
     Args:
         owner: Repository owner.
@@ -152,6 +169,8 @@ def post_pr_security_comment(
         pr_number: PR number.
         report: Step 6O Production Report dictionary.
         client: Optional GitHubClient instance.
+        max_pages: Maximum comment pages to inspect.
+        per_page: Items per page.
 
     Returns:
         GitHub API response dictionary for comment creation/update.
@@ -163,24 +182,38 @@ def post_pr_security_comment(
     api_client = client or GitHubClient()
     comment_body = format_pr_security_comment(report, owner=clean_owner, repository=clean_repo, pr_number=clean_pr_num)
 
-    # 1. Search for existing comments on the PR/issue
+    # 1. Search for existing comments on the PR/issue with bounded pagination
     list_endpoint = f"/repos/{clean_owner}/{clean_repo}/issues/{clean_pr_num}/comments"
-    comments_res = api_client.get(list_endpoint)
-
     existing_comment_id = None
-    if isinstance(comments_res, list):
+    page = 1
+
+    while page <= max_pages:
+        try:
+            comments_res = api_client.get(list_endpoint, params={"page": page, "per_page": per_page})
+        except Exception:
+            comments_res = []
+
+        if not isinstance(comments_res, list) or not comments_res:
+            break
+
         for c in comments_res:
             if isinstance(c, dict) and COMMENT_MARKER in str(c.get("body", "")):
                 existing_comment_id = c.get("id")
                 break
 
+        if existing_comment_id is not None or len(comments_res) < per_page:
+            break
+
+        page += 1
+
     # 2. Update existing comment or post new comment
-    if existing_comment_id:
+    if existing_comment_id is not None:
         update_endpoint = f"/repos/{clean_owner}/{clean_repo}/issues/comments/{existing_comment_id}"
         return api_client.request("PATCH", update_endpoint, json_data={"body": comment_body})
     else:
         post_endpoint = f"/repos/{clean_owner}/{clean_repo}/issues/{clean_pr_num}/comments"
         return api_client.request("POST", post_endpoint, json_data={"body": comment_body})
+
 
 
 # =============================================================================
@@ -223,20 +256,59 @@ def _scrub_sensitive_text(text: str) -> str:
 
 def generate_inline_finding_fingerprint(
     file_path: str,
-    line: int,
+    line: Optional[int],
     finding: Dict[str, Any]
 ) -> str:
     """
-    Generates a deterministic 16-hex fingerprint for an inline finding on a specific file and line.
+    Generates a deterministic 16-hex fingerprint for an inline finding on a file.
+    Follows Phase 31 structural fingerprinting:
+    - Independent of line shifts (omits raw line number).
+    - Distinguishes separate occurrences using scope, sink name, rule, and structural occurrence index.
+    - Zero secrets or raw source code included.
     """
-    norm_path = file_path.replace("\\", "/").strip().lstrip("./")
-    finding_id = str(finding.get("finding_id") or "")
-    title = str(finding.get("title") or "")
-    category = str(finding.get("category") or "")
-    cwe = str(finding.get("cwe") or finding.get("cwe_id") or "")
+    norm_path = _normalize_repo_relative_path(file_path).lower()
 
-    raw = f"{norm_path}:{line}:{finding_id}:{title}:{category}:{cwe}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    evidence = finding.get("evidence", [])
+    ev = evidence[0] if isinstance(evidence, list) and evidence and isinstance(evidence[0], dict) else {}
+
+    raw_rule = ev.get("signal_type") or finding.get("rule_id") or finding.get("category") or "unknown"
+    norm_rule = str(raw_rule).strip().lower()
+
+    raw_cwe = finding.get("cwe") or finding.get("cwe_id") or ""
+    norm_cwe = str(raw_cwe).strip().lower()
+
+    raw_scope = (
+        finding.get("scope")
+        or finding.get("function_name")
+        or ev.get("scope")
+        or ev.get("function_name")
+        or "<module>"
+    )
+    norm_scope = str(raw_scope).strip() or "<module>"
+
+    raw_sink = (
+        ev.get("signal_name")
+        or ev.get("sink_name")
+        or ev.get("call_name")
+        or finding.get("sink_name")
+        or finding.get("call_name")
+        or ""
+    )
+    norm_sink = str(raw_sink).strip()
+
+    raw_title = str(finding.get("title") or "").strip().lower()
+
+    occ = finding.get("occurrence_index")
+    if occ is None:
+        occ = ev.get("occurrence_index")
+
+    if occ is not None:
+        discriminator = str(occ)
+    else:
+        discriminator = str(finding.get("finding_id") or "0")
+
+    canonical = f"{norm_path}:{norm_rule}:{norm_cwe}:{norm_scope}:{norm_sink}:{raw_title}:{discriminator}"
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
 def format_inline_finding_comment(
@@ -332,6 +404,7 @@ def extract_inline_commentable_findings(
         return []
 
     commentable: List[Dict[str, Any]] = []
+    scope_occurrence_counts: Dict[Tuple[str, str, str], int] = {}
 
     for finding in findings:
         if not isinstance(finding, dict):
@@ -392,26 +465,139 @@ def extract_inline_commentable_findings(
             # Line is outside the PR diff hunk -> do NOT create inline comment
             continue
 
-        fp = generate_inline_finding_fingerprint(matched_target_path, line_num, finding)
+        ev_list = finding.get("evidence", [])
+        ev0 = ev_list[0] if isinstance(ev_list, list) and ev_list and isinstance(ev_list[0], dict) else {}
+        rule_key = str(ev0.get("signal_type") or finding.get("rule_id") or finding.get("category") or "unknown").lower()
+        scope_key = str(finding.get("scope") or ev0.get("scope") or "<module>")
+        occ_key = (matched_target_path, rule_key, scope_key)
+
+        finding_dict = dict(finding)
+        if "occurrence_index" not in finding_dict and "occurrence_index" not in ev0 and not finding_dict.get("finding_id"):
+            current_occ = scope_occurrence_counts.get(occ_key, 0)
+            scope_occurrence_counts[occ_key] = current_occ + 1
+            finding_dict["occurrence_index"] = current_occ
+
+        fp = generate_inline_finding_fingerprint(matched_target_path, line_num, finding_dict)
         commentable.append({
             "path": matched_target_path,
             "line": line_num,
             "side": "RIGHT",
-            "finding": finding,
+            "finding": finding_dict,
             "fingerprint": fp
         })
 
+
     return commentable
+
+
+
+def get_effective_review_mode(review_mode: Optional[str] = None) -> str:
+    """Resolves effective GitHub review mode ('comment' or 'enforce')."""
+    if review_mode and str(review_mode).strip().lower() in VALID_REVIEW_MODES:
+        return str(review_mode).strip().lower()
+    if settings is not None:
+        configured = getattr(settings, "CODESENTINEL_GITHUB_REVIEW_MODE", None) or getattr(settings, "GITHUB_REVIEW_MODE", "comment")
+        val = str(configured or "comment").strip().lower()
+        if val in VALID_REVIEW_MODES:
+            return val
+    return "comment"
+
+
+def map_review_status_to_review_event(
+    review_status: Optional[str],
+    review_mode: str = "comment"
+) -> str:
+    """
+    Maps canonical Step 6O review_status ('allow', 'block', 'review', 'invalid') to GitHub review event.
+    Enforce mode mapping:
+      - allow -> APPROVE
+      - block -> REQUEST_CHANGES
+      - review -> COMMENT
+      - invalid / unknown / None -> COMMENT (fail-closed: never APPROVE)
+    Default ('comment') mode always maps to COMMENT.
+    """
+    clean_mode = str(review_mode or "comment").strip().lower()
+    if clean_mode != "enforce":
+        return "COMMENT"
+
+    clean_status = str(review_status or "").strip().lower()
+    if clean_status == "allow":
+        return "APPROVE"
+    elif clean_status == "block":
+        return "REQUEST_CHANGES"
+    elif clean_status == "review":
+        return "COMMENT"
+    else:
+        # INVALID, UNKNOWN, or missing -> fail-closed: COMMENT, never APPROVE
+        return "COMMENT"
+
+
+def generate_review_marker(
+    head_sha: str,
+    review_status: str,
+    review_event: str,
+    finding_fingerprints: Optional[List[str]] = None
+) -> str:
+    """
+    Generates a deterministic hidden review marker for submission deduplication.
+    Never exposes secrets or source code.
+    """
+    fps = sorted(list(set(finding_fingerprints or [])))
+    fps_hash = hashlib.sha256(",".join(fps).encode("utf-8")).hexdigest()[:16]
+    clean_sha = str(head_sha or "").strip().lower()
+    clean_status = str(review_status or "allow").strip().lower()
+    clean_event = str(review_event or "COMMENT").strip().upper()
+    return f"{REVIEW_MARKER_PREFIX}{clean_sha}:{clean_status}:{clean_event}:{fps_hash}{REVIEW_MARKER_SUFFIX}"
+
+
+def get_existing_reviews(
+    owner: str,
+    repository: str,
+    pr_number: int,
+    client: Optional[GitHubClient] = None,
+    max_pages: int = DEFAULT_MAX_PAGINATION_PAGES,
+    per_page: int = DEFAULT_PAGINATION_PER_PAGE
+) -> List[Dict[str, Any]]:
+    """
+    Fetches existing PR reviews with bounded pagination to inspect CodeSentinel review markers.
+    """
+    clean_owner = validate_webhook_owner(owner)
+    clean_repo = validate_webhook_repo(repository)
+    clean_pr_num = validate_pr_number(pr_number)
+
+    api_client = client or GitHubClient()
+    endpoint = f"/repos/{clean_owner}/{clean_repo}/pulls/{clean_pr_num}/reviews"
+    reviews: List[Dict[str, Any]] = []
+    page = 1
+
+    try:
+        while page <= max_pages:
+            res = api_client.get(endpoint, params={"page": page, "per_page": per_page})
+            if not isinstance(res, list) or not res:
+                break
+            for r in res:
+                if isinstance(r, dict):
+                    reviews.append(r)
+            if len(res) < per_page:
+                break
+            page += 1
+    except Exception:
+        pass
+
+    return reviews
 
 
 def get_existing_inline_comment_fingerprints(
     owner: str,
     repository: str,
     pr_number: int,
-    client: Optional[GitHubClient] = None
+    client: Optional[GitHubClient] = None,
+    max_pages: int = DEFAULT_MAX_PAGINATION_PAGES,
+    per_page: int = DEFAULT_PAGINATION_PER_PAGE
 ) -> Set[str]:
     """
     Fetches existing PR review comments and extracts published CodeSentinel finding fingerprints.
+    Uses bounded pagination to handle large PRs reliably.
     Prevents duplicate inline comments on repeated webhook delivery.
     """
     clean_owner = validate_webhook_owner(owner)
@@ -420,12 +606,18 @@ def get_existing_inline_comment_fingerprints(
 
     api_client = client or GitHubClient()
     existing_fps: Set[str] = set()
+    endpoint = f"/repos/{clean_owner}/{clean_repo}/pulls/{clean_pr_num}/comments"
+    page = 1
+    total_comments = 0
+    max_comments = max_pages * per_page
 
     try:
-        endpoint = f"/repos/{clean_owner}/{clean_repo}/pulls/{clean_pr_num}/comments"
-        comments_res = api_client.get(endpoint)
-        if isinstance(comments_res, list):
+        while page <= max_pages and total_comments < max_comments:
+            comments_res = api_client.get(endpoint, params={"page": page, "per_page": per_page})
+            if not isinstance(comments_res, list) or not comments_res:
+                break
             for comment in comments_res:
+                total_comments += 1
                 if isinstance(comment, dict):
                     body = str(comment.get("body") or "")
                     if INLINE_COMMENT_MARKER_PREFIX in body:
@@ -435,8 +627,11 @@ def get_existing_inline_comment_fingerprints(
                                 fp = part.split(INLINE_COMMENT_MARKER_SUFFIX)[0].strip()
                                 if fp:
                                     existing_fps.add(fp)
+            if len(comments_res) < per_page:
+                break
+            page += 1
     except Exception:
-        # Non-blocking: if comment inspection fails, return empty set safely
+        # Non-blocking: if comment inspection fails, return collected set safely
         pass
 
     return existing_fps
@@ -449,22 +644,91 @@ def post_pr_inline_review_comments(
     head_sha: str,
     report: Dict[str, Any],
     changed_files: List[Any],
-    client: Optional[GitHubClient] = None
+    client: Optional[GitHubClient] = None,
+    review_mode: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Publishes inline Pull Request review comments on modified code lines for valid findings.
-    Enforces idempotency, diff-line bounds checking, and non-blocking error handling.
+    Enforces idempotency, diff-line bounds checking, review submission deduplication,
+    and non-blocking error handling.
     """
     clean_owner = validate_webhook_owner(owner)
     clean_repo = validate_webhook_repo(repository)
     clean_pr_num = validate_pr_number(pr_number)
     clean_head_sha = validate_commit_sha(head_sha)
 
+    eff_mode = get_effective_review_mode(review_mode)
+    review_status = str(report.get("review_status", "allow")).strip().lower()
+    review_event = map_review_status_to_review_event(review_status, review_mode=eff_mode)
+
     api_client = client or GitHubClient()
 
     # 1. Extract findings that map confidently to changed diff lines
     candidate_comments = extract_inline_commentable_findings(report, changed_files)
+    all_candidate_fps = [c["fingerprint"] for c in candidate_comments]
+    review_marker = generate_review_marker(clean_head_sha, review_status, review_event, all_candidate_fps)
+
+    # 2. Check for duplicate review submission on this exact commit SHA and verdict/findings
+    should_check_reviews = (eff_mode == "enforce")
+    if should_check_reviews:
+
+        try:
+            existing_reviews = get_existing_reviews(clean_owner, clean_repo, clean_pr_num, client=api_client)
+            for rev in existing_reviews:
+                rev_body = str(rev.get("body") or "")
+                if review_marker in rev_body:
+                    return {
+                        "status": "skipped",
+                        "reason": "review_already_submitted",
+                        "comments_count": 0,
+                        "posted_findings": []
+                    }
+        except Exception:
+            pass
+
+
+    # 3. Handle cases where no diff-scoped findings exist
     if not candidate_comments:
+        # In enforce mode, submit review (APPROVE or REQUEST_CHANGES) if verdict demands it
+        if eff_mode == "enforce" and review_event in ("APPROVE", "REQUEST_CHANGES"):
+            review_endpoint = f"/repos/{clean_owner}/{clean_repo}/pulls/{clean_pr_num}/reviews"
+            if review_event == "APPROVE":
+                body_msg = "No blocking security vulnerabilities detected. Pull request approved by CodeSentinel."
+            else:
+                body_msg = "High or critical security vulnerabilities detected. Remediate findings before merging."
+            review_body = f"{review_marker}\n## CodeSentinel Security Audit — {review_event}\n\n{body_msg}"
+            batch_payload = {
+                "commit_id": clean_head_sha,
+                "event": review_event,
+                "body": review_body,
+                "comments": []
+            }
+            try:
+                res = api_client.request("POST", review_endpoint, json_data=batch_payload)
+                review_id = res.get("id") if isinstance(res, dict) else None
+                return {
+                    "status": "success",
+                    "method": "batch_review",
+                    "comments_count": 0,
+                    "review_id": review_id,
+                    "review_event": review_event,
+                    "posted_findings": []
+                }
+            except (GitHubAuthenticationError, GitHubPermissionError, GitHubNotFoundError, GitHubRateLimitError) as gh_err:
+                return {
+                    "status": "skipped",
+                    "reason": type(gh_err).__name__,
+                    "comments_count": 0,
+                    "posted_findings": []
+                }
+            except Exception as exc:
+                return {
+                    "status": "skipped",
+                    "reason": f"review_submission_error_{type(exc).__name__}",
+                    "comments_count": 0,
+                    "posted_findings": []
+                }
+
         return {
             "status": "skipped",
             "reason": "no_diff_scoped_findings",
@@ -472,7 +736,7 @@ def post_pr_inline_review_comments(
             "posted_findings": []
         }
 
-    # 2. Query existing comments to prevent duplicates
+    # 4. Query existing comments to prevent duplicates
     existing_fps = get_existing_inline_comment_fingerprints(
         owner=clean_owner,
         repository=clean_repo,
@@ -497,7 +761,7 @@ def post_pr_inline_review_comments(
             seen_fps.add(c["fingerprint"])
             unique_to_post.append(c)
 
-    # 3. Format review comments payload
+    # 5. Format review comments payload
     comments_payload = []
     for item in unique_to_post:
         comments_payload.append({
@@ -507,16 +771,17 @@ def post_pr_inline_review_comments(
             "body": format_inline_finding_comment(item["finding"], item["fingerprint"])
         })
 
-    # 4. Attempt batch review submission via Pull Request Reviews API
+    # 6. Attempt batch review submission via Pull Request Reviews API
     review_endpoint = f"/repos/{clean_owner}/{clean_repo}/pulls/{clean_pr_num}/reviews"
     review_body = (
+        f"{review_marker}\n"
         "## CodeSentinel Security Audit — Inline Review Findings\n\n"
         "Security findings were identified on lines modified in this pull request. "
         "Please review the inline recommendations below."
     )
     batch_payload = {
         "commit_id": clean_head_sha,
-        "event": "COMMENT",
+        "event": review_event,
         "body": review_body,
         "comments": comments_payload
     }
@@ -529,7 +794,15 @@ def post_pr_inline_review_comments(
             "method": "batch_review",
             "comments_count": len(comments_payload),
             "review_id": review_id,
+            "review_event": review_event,
             "posted_findings": [c["fingerprint"] for c in unique_to_post]
+        }
+    except (GitHubAuthenticationError, GitHubPermissionError, GitHubNotFoundError, GitHubRateLimitError) as gh_err:
+        return {
+            "status": "skipped",
+            "reason": type(gh_err).__name__,
+            "comments_count": 0,
+            "posted_findings": []
         }
     except GitHubAPIError as api_err:
         # If batch review fails with 422 (e.g. line outside diff in GitHub's view),
@@ -566,13 +839,6 @@ def post_pr_inline_review_comments(
                 "comments_count": 0,
                 "posted_findings": []
             }
-    except (GitHubAuthenticationError, GitHubPermissionError, GitHubNotFoundError, GitHubRateLimitError) as gh_err:
-        return {
-            "status": "skipped",
-            "reason": type(gh_err).__name__,
-            "comments_count": 0,
-            "posted_findings": []
-        }
     except Exception as exc:
         return {
             "status": "skipped",

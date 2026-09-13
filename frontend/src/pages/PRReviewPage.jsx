@@ -83,47 +83,53 @@ export default function PRReviewPage() {
 
     const fetchAnalysisData = async () => {
       try {
-        const [analysisRes, findingsRes] = await Promise.allSettled([
-          getAnalysis(selectedAnalysisId),
-          getAnalysisFindings(selectedAnalysisId)
-        ]);
+        let analysisObj = null;
+        let rawFindings = null;
 
-        if (!isMounted) return;
-
-        // Handle Analysis Details
-        if (analysisRes.status === 'fulfilled' && analysisRes.value?.analysis) {
-          setSelectedAnalysis(analysisRes.value.analysis);
-        } else {
+        try {
+          const analysisRes = await getAnalysis(selectedAnalysisId);
+          if (analysisRes?.analysis) {
+            analysisObj = analysisRes.analysis;
+            if (Array.isArray(analysisRes.analysis.findings)) {
+              rawFindings = analysisRes.analysis.findings;
+            }
+          }
+        } catch (err) {
           // Graceful fallback to the item in the list if single-fetch fails
           const fallback = analyses.find(a => a.analysis_id === selectedAnalysisId);
           if (fallback) {
-            setSelectedAnalysis(fallback);
+            analysisObj = fallback;
+            if (Array.isArray(fallback.findings)) {
+              rawFindings = fallback.findings;
+            }
           } else {
-            setAnalysisError(analysisRes.reason?.message || 'Failed to load analysis details');
+            setAnalysisError(err?.message || 'Failed to load analysis details');
           }
         }
 
-        // Handle Findings Details
-        if (findingsRes.status === 'fulfilled' && findingsRes.value) {
-          const rawFindings = Array.isArray(findingsRes.value.findings) ? findingsRes.value.findings : [];
-          setFindings(rawFindings);
-          if (rawFindings.length > 0) {
-            setSelectedFindingId(rawFindings[0].finding_id);
-          } else {
-            setSelectedFindingId(null);
+        if (!isMounted) return;
+
+        if (analysisObj) {
+          setSelectedAnalysis(analysisObj);
+        }
+
+        // If findings were not embedded in the analysis record, fallback to dedicated findings endpoint
+        if (rawFindings === null) {
+          try {
+            const findingsRes = await getAnalysisFindings(selectedAnalysisId);
+            rawFindings = Array.isArray(findingsRes?.findings) ? findingsRes.findings : [];
+          } catch (fErr) {
+            setFindingsError(fErr?.message || 'Findings unavailable');
+            rawFindings = [];
           }
-        } else if (analysisRes.status === 'fulfilled' && Array.isArray(analysisRes.value?.analysis?.findings)) {
-          // If findings endpoint failed but findings were embedded in the analysis record
-          const embedded = analysisRes.value.analysis.findings;
-          setFindings(embedded);
-          if (embedded.length > 0) {
-            setSelectedFindingId(embedded[0].finding_id);
-          } else {
-            setSelectedFindingId(null);
-          }
+        }
+
+        if (!isMounted) return;
+
+        setFindings(rawFindings);
+        if (rawFindings.length > 0) {
+          setSelectedFindingId(rawFindings[0].finding_id);
         } else {
-          setFindingsError(findingsRes.reason?.message || 'Findings unavailable');
-          setFindings([]);
           setSelectedFindingId(null);
         }
       } catch (err) {

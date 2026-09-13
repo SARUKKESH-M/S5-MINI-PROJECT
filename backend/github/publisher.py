@@ -40,14 +40,17 @@ VALID_COMMIT_STATES = {"error", "failure", "pending", "success"}
 DECISION_TO_CHECK_CONCLUSION = {
     "allow": "success",
     "block": "failure",
-    "review": "action_required"
+    "review": "action_required",
+    "invalid": "failure"
 }
 
 DECISION_TO_COMMIT_STATE = {
     "allow": "success",
     "block": "failure",
-    "review": "pending"
+    "review": "pending",
+    "invalid": "failure"
 }
+
 
 
 def map_review_decision_to_check_conclusion(review_status: str) -> str:

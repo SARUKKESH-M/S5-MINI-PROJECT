@@ -139,16 +139,31 @@ class MockLLMProvider(LLMProvider):
         }
 
     def explain_findings(self, findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Add deterministic explanation provenance without creating or removing findings.
+        """Add deterministic structured explanation without creating or removing findings.
 
-        Stage 7A orchestration uses this method after AST finding generation.  The
-        legacy ``analyze`` method remains for the existing public 6H context API.
+        Produces a full structured explanation contract grounded in authoritative
+        metadata and curated OWASP/CWE knowledge while maintaining backward-compatible
+        explanation and recommendation fields.
         """
+        try:
+            from llm.explanation_contract import generate_deterministic_fallback_explanation
+        except ImportError:
+            from explanation_contract import generate_deterministic_fallback_explanation
+
         explained: List[Dict[str, Any]] = []
         for finding in findings:
             item = dict(finding)
-            if not item.get("recommendation"):
-                item["recommendation"] = "Review this security-sensitive operation and avoid untrusted dynamic input."
+            k_doc = item.get("_retrieved_knowledge_doc")
+            if not k_doc and isinstance(item.get("retrieved_knowledge"), list) and item.get("retrieved_knowledge"):
+                k_doc = item["retrieved_knowledge"][0]
+
+            structured = generate_deterministic_fallback_explanation(item, knowledge_doc=k_doc)
+            structured["provenance"] = "mock_llm"
+
+            item["structured_explanation"] = structured
+            item["explanation"] = structured["why_it_matters"]
+            item["recommendation"] = structured["remediation"]
+
             enriched_by = list(item.get("enriched_by", []))
             if "mock_llm" not in enriched_by:
                 enriched_by.append("mock_llm")

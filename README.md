@@ -10,13 +10,13 @@ CodeSentinel delivers automated, non-executing static security analysis for code
 
 | Metric | Status / Verified Baseline |
 | :--- | :--- |
-| **Release Version** | `1.0.0` |
+| **Release Version** | `1.1.0` |
 | **API Version** | `v1` |
 | **Development Series** | 6-Series Complete |
 | **Security Gate Baseline** | `ALLOW` — 0 findings on production repository scan |
 | **Regression Test Baseline** | `469 passed / 0 failed` (current verified baseline) |
 | **Frontend UI** | Production build verified (`frontend/dist/`) |
-| **Containerization** | Verified Docker multi-stage build, runtime, and Docker Compose (`codesentinel:1.0.0`) |
+| **Containerization** | Verified Docker multi-stage build, runtime, and Docker Compose (`codesentinel:1.1.0`) |
 | **Current Commit** | `16799eb` |
 
 ---
@@ -41,8 +41,9 @@ CodeSentinel delivers automated, non-executing static security analysis for code
 - **Scope & Exclusion Controls**: Automatic exclusion of build artifacts, test directories, package managers, virtual environments, and path normalization against traversal attacks.
 - **Incremental Analysis**: Git-diff aware file inspection filtering out unchanged files to accelerate scanning on incremental commits.
 - **Observability & Health Checks**: Secret-safe platform health (`/platform/health`), readiness (`/platform/readiness`), release readiness (`/platform/readiness/release`), capability info (`/platform/info`), and internal telemetry metrics (`/platform/metrics`).
+- **Security Analytics V2 & Telemetry**: Server-side historical posture analytics (`/analytics/summary`, `/analytics/vulnerabilities`, `/analytics/repositories`, `/analytics/suppressions`, `/platform/developers`) featuring bounded time-window filtering (`7d`, `30d`, `90d`, `all`), severity distributions, top CWE categories, multi-repository risk tracking, and false-positive suppression telemetry with dynamically derived expiration.
 - **Unified CLI**: Comprehensive command-line interface for local developer scanning, CI gate checks, report formatting, and platform diagnostics.
-- **Production Containerization**: Hardened, multi-stage non-root Docker container deployment (`codesentinel:1.0.0`) with Docker Compose support.
+- **Production Containerization**: Hardened, multi-stage non-root Docker container deployment (`codesentinel:1.1.0`) with Docker Compose support.
 
 ---
 
@@ -97,10 +98,39 @@ Repository Source / PR Diff
 6. **Report Service (`backend/analysis/report_service.py`)**: Assembles and validates the canonical Step 6O Production Security Report contract.
 7. **Security Gate (`backend/analysis/security_gate.py`)**: Deterministically enforces release and build policies based on finding severities.
 8. **GitHub Orchestrator (`backend/github`)**: Manages webhook verification, PR diff retrieval, status check publishing, and PR review comments.
+9. **Security Analytics Engine (`backend/analysis/storage/store.py`, `backend/app/api/analytics.py`)**: High-performance SQLite-indexed aggregation layer providing historical posture metrics, vulnerability categorization, repository risk distribution, and suppression intelligence without mutating analysis findings or participating in gate evaluations.
+
+### Security Analytics V2 Architectural Contract
+
+The Security Analytics V2 subsystem operates strictly in an observational, downstream capacity:
+
+```
+Frontend Command Center (Preset Windows: 7D / 30D / 90D / ALL)
+           │
+           │ HTTP REST (/analytics/*, /platform/developers)
+           ▼
+FastAPI Analytics Router (backend/app/api/analytics.py)
+           │
+           ▼
+AnalysisStore Engine (backend/analysis/storage/store.py)
+           │
+           ▼
+Native SQLite Database (Indexed SQL Aggregations)
+```
 
 > [!IMPORTANT]
-> **TARGET REPOSITORY CODE IS NOT EXECUTED.**
-> CodeSentinel operates exclusively via static text parsing, syntax tree inspection, and heuristic analysis. Code under inspection is never compiled, imported, executed, or run in any sandbox.
+> **STRICT OBSERVATIONAL SEPARATION GUARANTEE**
+> Analytics endpoints are strictly read-only. The analytics subsystem does **NOT** participate in:
+> - Deterministic finding generation
+> - Tree-sitter AST structural analysis
+> - Bounded taint propagation analysis
+> - Step 6O production report generation or validation
+> - Step 6O security gate evaluation (`evaluate_security_gate`)
+> - LLM security reasoning or prompt construction
+> - RAG vector retrieval or knowledge-base indexing
+> - GitHub review commenting or check-run publishing
+>
+> Target code is never executed, findings are never mutated, and gate policies remain 100% deterministic and isolated.
 
 ---
 
@@ -122,6 +152,12 @@ CodeSentinel is designed with defensive software engineering and least-privilege
 - **Path Traversal Protection**: All paths are resolved and verified against the repository root; attempts to escape the root boundary via `..` segments or directory traversal raise explicit validation errors.
 - **Webhook Authentication**: All GitHub webhook deliveries must pass cryptographic HMAC-SHA256 signature verification matching `X-Hub-Signature-256`.
 - **Fail-Closed Security Gate**: Any malformed report, conflicting status, or unhandled exception immediately results in an `INVALID` (exit code 1) failure, preventing unverified code from bypassing CI.
+- **Observational Analytics Immutability**: All analytics operations are strictly read-only and query-driven via parameterized SQL. Analytics endpoints never mutate findings, never mutate suppressions, never invoke `evaluate_security_gate()`, never alter finding severities, confidences, or taint tracking states, and never leak source code snippets, evidence excerpts, or secrets.
+- **Derived Suppression Lifecycle Semantics**:
+  - `ACTIVE`: A reviewed suppression whose `expires_at` timestamp is `None` or in the future.
+  - `EXPIRED`: State is **dynamically derived at query time** by comparing `expires_at` against current UTC time. The database row status is **never mutated** to `EXPIRED`, preserving immutable audit history.
+  - `REVOKED`: A suppression explicitly revoked by security administrators.
+  - Legacy v1 suppressions lacking expiration timestamps fail-closed.
 - **Container Isolation**: Multi-stage Docker image runs as unprivileged user `codesentinel` (UID 1000, GID 1000).
 
 ### Security Gate Exit Decisions
@@ -339,7 +375,7 @@ When the backend is running, interactive API exploration and OpenAPI schemas are
 - **`GET /platform/info`**
   - **Purpose**: Platform metadata, version, and enabled capability list.
   - **Parameters**: None.
-  - **Response**: `{"service": "CodeSentinel", "version": "1.0.0", "api_version": "v1", "enabled_capabilities": [...]}`
+  - **Response**: `{"service": "CodeSentinel", "version": "1.1.0", "api_version": "v1", "enabled_capabilities": [...]}`
 
 - **`GET /platform/policies`**
   - **Purpose**: Retrieves all available security analysis policy profiles.
@@ -350,6 +386,11 @@ When the backend is running, interactive API exploration and OpenAPI schemas are
   - **Purpose**: Retrieves internal observability counters and execution metrics.
   - **Parameters**: None.
   - **Response**: JSON map of recorded telemetry metrics (e.g., `scans_total`, `health_checks_total`).
+
+- **`GET /platform/developers`**
+  - **Purpose**: Retrieves developer security analytics and activity posture aggregated from historical analyses.
+  - **Parameters**: `time_window` (optional string: `7d`, `30d`, `90d`, `all`), `repository` (optional string), `limit` (int, 1–100, default: 50).
+  - **Response**: `{"status": "success", "developers": [{"author": "...", "analysis_count": int, "finding_count": int, "severities": {...}, "last_activity": "..."}, ...]}`
 
 #### Analysis Operations
 
@@ -400,6 +441,28 @@ When the backend is running, interactive API exploration and OpenAPI schemas are
   - **Parameters**: `analysis_id` (path string).
   - **Response**: `{"status": "success", "analysis_id": "...", "deleted": true}`
 
+#### Security Analytics V2 & Posture Telemetry
+
+- **`GET /analytics/summary`**
+  - **Purpose**: Consolidated historical security summary metrics.
+  - **Parameters**: `time_window` (`7d`, `30d`, `90d`, `all`; default: `30d`), `repository_id` (optional string).
+  - **Response**: Summary object containing `total_analyses`, `total_findings`, severity tallies (`critical`, `high`, `medium`, `low`, `info`), `review_status` gate breakdown, and `suppressions` summary.
+
+- **`GET /analytics/vulnerabilities`**
+  - **Purpose**: Server-side vulnerability and CWE category aggregation with severity breakdown and deterministic ordering.
+  - **Parameters**: `time_window` (`7d`, `30d`, `90d`, `all`; default: `30d`), `repository_id` (optional string), `limit` (int, 1–100, default: 10).
+  - **Response**: Array of vulnerability categories with aggregated occurrence counts and per-category severity breakdowns.
+
+- **`GET /analytics/repositories`**
+  - **Purpose**: Repository-level security posture aggregation.
+  - **Parameters**: `time_window` (`7d`, `30d`, `90d`, `all`; default: `30d`), `limit` (int, 1–100, default: 20).
+  - **Response**: Array of repository risk records containing `repository_id`, `analysis_count`, `finding_count`, severity breakdown, and `last_analyzed` ISO timestamp.
+
+- **`GET /analytics/suppressions`**
+  - **Purpose**: False-positive suppression intelligence telemetry.
+  - **Parameters**: `time_window` (`7d`, `30d`, `90d`, `all`; default: `30d`), `repository_id` (optional string).
+  - **Response**: Telemetry object containing `total_suppressions`, `active_count`, `expired_count`, `revoked_count`, reason-code distribution (`by_reason`), and fingerprint version distribution (`by_fingerprint_version`). Expiration is derived dynamically at query time; underlying rows remain immutable.
+
 #### GitHub Webhooks
 
 - **`POST /github/webhook`**
@@ -414,7 +477,7 @@ When the backend is running, interactive API exploration and OpenAPI schemas are
 
 CodeSentinel is containerized using a hardened multi-stage Dockerfile adhering to production security standards:
 
-- **Canonical Image**: `codesentinel:1.0.0`
+- **Canonical Image**: `codesentinel:1.1.0`
 - **Listening Port**: `8000`
 - **Runtime User**: Unprivileged user `codesentinel` (UID `1000`, GID `1000`)
 - **Environment**: `APP_ENV=production`, `DEBUG=False`
@@ -427,7 +490,7 @@ CodeSentinel is containerized using a hardened multi-stage Dockerfile adhering t
 ### Build Docker Image
 
 ```bash
-docker build -t codesentinel:1.0.0 .
+docker build -t codesentinel:1.1.0 .
 ```
 
 ### Run Standalone Container
@@ -441,7 +504,7 @@ docker run -d \
   -e ALLOWED_ORIGINS="http://localhost:3000" \
   -e GROQ_API_KEY="your_groq_api_key_placeholder" \
   -v codesentinel-data:/app/data \
-  codesentinel:1.0.0
+  codesentinel:1.1.0
 ```
 
 ### Deploy via Docker Compose
@@ -514,6 +577,38 @@ npm run build
 
 The compiled assets are placed in `frontend/dist/` and can be served via Nginx, AWS CloudFront, or any static file host. The frontend communicates with the CodeSentinel backend over HTTP REST APIs at `http://localhost:8000`.
 
+### Command Center Server-Side Analytics & Architecture
+
+CodeSentinel Command Center (`/command-center`) delivers an enterprise-grade DevSecOps operational dashboard powered by server-side Security Analytics V2.
+
+#### Architecture Evolution: Old vs. New
+
+| Dimension | Legacy Architecture (Pre-Phase 32) | Security Analytics V2 Architecture |
+| :--- | :--- | :--- |
+| **Severity Distribution** | Client-side aggregation from latest 25 analyses | Authoritative server-side aggregation via `GET /analytics/summary` |
+| **Top Vulnerabilities** | **N+1 Request Pattern**: Client fetched 25 analyses, then issued up to 10 sequential `GET /analyses/{id}/findings` requests | **Single-Request Aggregation**: `GET /analytics/vulnerabilities` returns indexed, pre-aggregated categories directly from SQLite |
+| **Repository Posture** | Client-side JavaScript `Map` reconstructed from latest 25 analyses | Server-side multi-repository risk aggregation via `GET /analytics/repositories` |
+| **Suppression Telemetry** | None (untracked in dashboard) | Authoritative suppression intelligence panel via `GET /analytics/suppressions` |
+| **Time-Window Filtering** | None (fixed to latest 25 analyses) | Global time-window selector: `7D`, `30D`, `90D`, `ALL` (default: `30D`) |
+| **Frontend Network Load** | High (12+ HTTP requests on initial load) | Bounded & Lean (4 distinct analytics calls + developer endpoint) |
+
+#### Time-Window Controls
+
+The Command Center header features an interactive segmented time-window control:
+- **`7D`**: Filters analytics across the last 7 UTC days (`now - 7 days`).
+- **`30D`**: Filters analytics across the last 30 UTC days (default initial state).
+- **`90D`**: Filters analytics across the last 90 UTC days.
+- **`ALL`**: Disables time cutoff, aggregating across entire historical analysis persistence.
+
+Selecting a time window updates state and refreshes analytics components concurrently without full-page reloads, stale data leakage, or duplicate request storms.
+
+#### Performance Design Principles
+
+- **Server-Side Aggregation**: All counting, grouping, and ordering operations execute inside native SQLite using dedicated indexes (`idx_findings_category_severity`, `idx_findings_severity`, `idx_fp_status_reason`, `idx_fp_created_at`).
+- **Bounded Result Limits**: All collection endpoints strictly enforce pagination bounds (`limit` parameter between 1 and 100) preventing memory exhaustion.
+- **Elimination of Frontend N+1**: Raw findings loops are completely eliminated from dashboard metrics.
+- **Zero Polling & Lightweight Footprint**: Metrics are requested on demand upon load or user-initiated window selection. No polling loops, WebSockets, or heavy external time-series databases (e.g. Prometheus, ClickHouse) are required.
+
 ---
 
 ## 13. Known Technical Limitations
@@ -533,8 +628,27 @@ To ensure engineering transparency, the following technical limitations reflect 
    - The GitHub webhook ingress parses and returns the `X-GitHub-Delivery` GUID, but does not persist delivery IDs in a persistent cache or database to reject duplicate deliveries.
 5. **Local Webhook Tunneling Dependency**:
    - Local testing of GitHub webhook events requires an external reverse-tunnel service (such as `ngrok`, `smee.io`, or `cloudflared`) to route public GitHub HTTP POST deliveries to `localhost:8000`.
-6. **Single-Repository Analytics Scope**:
-   - Static scans, PR analysis runs, and historical records operate on individual repository workspaces. Aggregated multi-tenant enterprise fleet metrics across hundreds of distinct repositories are not yet aggregated into a single view.
+6. **Repository Identity Persistence**:
+   - Repository risk metrics (`/analytics/repositories`) derive repository identity from persisted analysis summary metadata rather than a dedicated, indexed relational repository column.
+7. **Fixed Time-Window Presets**:
+   - Analytics V2 supports fixed presets (`7d`, `30d`, `90d`, `all`). Custom arbitrary date pickers and sliding-window intervals are not currently supported.
+8. **Finding Burndown & Fix Velocity**:
+   - Historical finding burndown charts, fix velocity tracking, and Mean Time to Remediate (MTTR) are not yet implemented.
+9. **Multi-Tenant Enterprise Hierarchy**:
+   - Multi-tenant organization and team access partitioning is not implemented at the database layer.
+10. **Predictive & ML Risk Scoring**:
+    - Machine learning risk predictions and heuristic severity forecasting are intentionally excluded in favor of deterministic, auditable static aggregation.
+
+### Non-Goals
+
+To maintain security integrity and architectural stability, the following are explicit non-goals for CodeSentinel:
+
+- **No AST Analyzer Alterations**: AST inspection rules and Tree-sitter parsers remain strictly decoupled from analytics and reporting.
+- **No Taint Engine Alterations**: Bounded taint analysis and taint propagation state machines are never influenced by historical metrics.
+- **No Security Gate Alterations**: Step 6O security gate policies (`ALLOW`, `REVIEW`, `BLOCK`, `INVALID`) remain purely deterministic and independent of analytics.
+- **No LLM/RAG Risk Scoring**: Large language models and RAG retrieval pipelines are not invoked for metric aggregation, sorting, or posture calculations.
+- **No External Database Infrastructure**: No PostgreSQL, Redis, Celery, ClickHouse, or time-series databases are introduced; persistence relies exclusively on zero-dependency native SQLite.
+- **No Frontend Raw Data Crunching**: The web dashboard must not aggregate raw finding records in browser memory for dashboard presentation.
 
 ---
 
@@ -577,7 +691,7 @@ flowchart LR
 
 ## 15. Future Roadmap (Stage 7)
 
-The following items are planned architectural extensions and are **NOT YET IMPLEMENTED** in version 1.0.0:
+The following items are planned architectural extensions and are **NOT YET IMPLEMENTED** in version 1.1.0:
 
 - [ ] **Multi-Agent Orchestration**: LangGraph-based specialized agent architecture for iterative multi-turn vulnerability verification.
 - [ ] **IDE & Editor Integrations**: Official VS Code and JetBrains extensions for inline, real-time static security feedback.

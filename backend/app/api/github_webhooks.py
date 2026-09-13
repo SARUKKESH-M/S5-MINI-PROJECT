@@ -50,7 +50,14 @@ async def github_webhook_endpoint(
     raw_body = await request.body()
     webhook_secret = getattr(settings, "GITHUB_WEBHOOK_SECRET", None)
 
-    # 1. Enforce signature verification if webhook secret is configured
+    # 1. Enforce signature verification (fail-closed in production)
+    env = (getattr(settings, "APP_ENV", None) or getattr(settings, "ENVIRONMENT", "development")).strip().lower()
+    if env == "production" and (not webhook_secret or not webhook_secret.strip()):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Production webhook secret is not configured"
+        )
+
     if webhook_secret and webhook_secret.strip():
         if not x_hub_signature_256:
             raise HTTPException(

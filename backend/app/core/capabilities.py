@@ -15,7 +15,7 @@ def get_platform_capabilities() -> Dict[str, Any]:
     """
     return {
         "service": "CodeSentinel",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "api_version": "v1",
         "enabled_capabilities": [
             "static_ast_engine",

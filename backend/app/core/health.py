@@ -94,7 +94,7 @@ def get_platform_health() -> Dict[str, Any]:
     return {
         "status": overall,
         "service": "CodeSentinel",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "environment": getattr(settings, "APP_ENV", "development"),
         "checks": checks
     }

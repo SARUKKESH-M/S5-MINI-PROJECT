@@ -317,7 +317,7 @@ def test_platform_capabilities_endpoint():
     assert res.status_code == 200
     info = res.json()
     assert info["service"] == "CodeSentinel"
-    assert info["version"] == "1.0.0"
+    assert info["version"] == "1.1.0"
     assert info["api_version"] == "v1"
     assert "enabled_capabilities" in info
     assert "default" in info["supported_policy_profiles"]

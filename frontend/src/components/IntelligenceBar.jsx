@@ -5,7 +5,7 @@ import { getPlatformHealth, getPlatformInfo } from '../services/apiClient';
 export default function IntelligenceBar() {
   const [systemState, setSystemState] = useState({
     status: 'green',
-    version: '1.0.0',
+    version: '1.1.0',
     service: 'CodeSentinel',
     title: 'Engine Status: Operational'
   });
@@ -22,7 +22,7 @@ export default function IntelligenceBar() {
 
         let statusColor = 'green';
         let statusTitle = 'Engine Status: Operational';
-        let versionStr = '1.0.0';
+        let versionStr = '1.1.0';
         let serviceStr = 'CodeSentinel';
 
         if (healthRes.status === 'fulfilled' && healthRes.value) {

@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     GITHUB_WEBHOOK_SECRET: Optional[str] = None
     GITHUB_API_BASE_URL: str = "https://api.github.com"
     GITHUB_API_VERSION: str = "2022-11-28"
+    GITHUB_REVIEW_MODE: str = "comment"  # "comment" (default) or "enforce"
+    CODESENTINEL_GITHUB_REVIEW_MODE: Optional[str] = None
+    MAX_CONCURRENT_GITHUB_FETCHES: int = 4
 
     # Database & Cache Connection Strings
     DATABASE_URL: Optional[str] = None
@@ -99,7 +102,13 @@ class Settings(BaseSettings):
             if val and any(unsafe in str(val).lower() for unsafe in ["password", "secret123", "dummy", "placeholder", "your_token"]):
                 errors.append(f"Security field '{field}' contains an unsafe placeholder or default credential")
 
+        # 5. Enforce valid GitHub review mode enum
+        effective_mode = (self.CODESENTINEL_GITHUB_REVIEW_MODE or self.GITHUB_REVIEW_MODE or "comment").strip().lower()
+        if effective_mode not in ("comment", "enforce"):
+            errors.append(f"Invalid GITHUB_REVIEW_MODE: '{effective_mode}'. Must be 'comment' or 'enforce'")
+
         return len(errors) == 0, errors
+
 
 
 # Application Settings Instance Singleton

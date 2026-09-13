@@ -5,11 +5,15 @@ Treats source code strictly as static, untrusted data without dynamic execution 
 """
 
 import hashlib
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from ast_engine.evidence_normalizer import normalize_security_evidence
 
 
-def build_rag_documents(source_code: str, file_path: str = "") -> List[Dict[str, Any]]:
+def build_rag_documents(
+    source_code: str = "",
+    file_path: str = "",
+    normalized_evidence: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     """Build deterministic RAG document objects from normalized AST evidence.
 
     Converts normalized evidence into a list of documents:
@@ -17,9 +21,13 @@ def build_rag_documents(source_code: str, file_path: str = "") -> List[Dict[str,
       - N function_structure documents
       - N security_evidence documents
 
+    If normalized_evidence is provided, reuses it directly without re-parsing AST or re-running taint analysis.
     Returns JSON-serializable list of document dictionaries.
     """
-    normalized = normalize_security_evidence(source_code, file_path=file_path)
+    if normalized_evidence is not None and isinstance(normalized_evidence, dict):
+        normalized = normalized_evidence
+    else:
+        normalized = normalize_security_evidence(source_code, file_path=file_path)
     documents: List[Dict[str, Any]] = []
 
     schema_version = normalized.get("schema_version", "1.0")

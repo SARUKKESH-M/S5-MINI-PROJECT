@@ -24,7 +24,7 @@ export default function SystemHealthPage() {
   const [healthData, setHealthData] = useState({
     status: 'unknown',
     service: 'CodeSentinel',
-    version: '1.0.0',
+    version: '1.1.0',
     environment: 'development',
     checks: null,
     error: null
@@ -42,7 +42,7 @@ export default function SystemHealthPage() {
   // 3. Platform info state from GET /platform/info
   const [platformInfo, setPlatformInfo] = useState({
     service: 'CodeSentinel',
-    version: '1.0.0',
+    version: '1.1.0',
     apiVersion: 'v1',
     capabilities: [],
     supportedModes: [],
@@ -104,7 +104,7 @@ export default function SystemHealthPage() {
         setHealthData({
           status: h.status || 'healthy',
           service: h.service || 'CodeSentinel',
-          version: h.version || '1.0.0',
+          version: h.version || '1.1.0',
           environment: h.environment || 'development',
           checks: h.checks || null,
           error: null
@@ -163,7 +163,7 @@ export default function SystemHealthPage() {
         const inf = infoRes.value;
         setPlatformInfo({
           service: inf.service || 'CodeSentinel',
-          version: inf.version || '1.0.0',
+          version: inf.version || '1.1.0',
           apiVersion: inf.api_version || 'v1',
           capabilities: Array.isArray(inf.enabled_capabilities) ? inf.enabled_capabilities : [],
           supportedModes: Array.isArray(inf.supported_analysis_modes) ? inf.supported_analysis_modes : [],

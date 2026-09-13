@@ -65,7 +65,7 @@ def test_cli_help_and_version(capsys):
     exit_code = main(["version"])
     assert exit_code == 0
     captured = capsys.readouterr()
-    assert "CodeSentinel CLI v1.0.0" in captured.out
+    assert "CodeSentinel CLI v1.1.0" in captured.out
 
 
 def test_cli_platform_commands(capsys):
@@ -97,7 +97,7 @@ def test_cli_json_mode(capsys):
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["service"] == "CodeSentinel"
-    assert data["version"] == "1.0.0"
+    assert data["version"] == "1.1.0"
 
 
 # ==============================================================================

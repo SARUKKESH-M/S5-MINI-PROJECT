@@ -8,19 +8,28 @@ Converts source code into RAG-compatible document representations while enforcin
   - Structural evidence preservation (no severity or vulnerability verdicts)
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from ast_engine.rag_documents import build_rag_documents
 
 
-def prepare_ast_documents_for_rag(source_code: str, file_path: str = "") -> List[Dict[str, Any]]:
+def prepare_ast_documents_for_rag(
+    source_code: str = "",
+    file_path: str = "",
+    normalized_evidence: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     """Prepare RAG-compatible document objects from Python source code AST evidence.
 
     Composes build_rag_documents() and validates compliance with the RAG ingestion contract:
       - Each item contains 'document_id', 'content', and 'metadata'
       - Metadata preserves schema_version, language, document_type, function_name, class_name, line_start, line_end, signal_type, signal_name, and source='ast_engine'
       - Raw secret values and full source code blocks are strictly excluded
+    If normalized_evidence is provided, reuses it directly without duplicate AST parsing or taint evaluation.
     """
-    rag_docs = build_rag_documents(source_code, file_path=file_path)
+    rag_docs = build_rag_documents(
+        source_code=source_code,
+        file_path=file_path,
+        normalized_evidence=normalized_evidence,
+    )
 
     # Ensure adapter output complies with standard RAG ingestion schema
     adapted_docs: List[Dict[str, Any]] = []

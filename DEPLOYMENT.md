@@ -39,7 +39,7 @@ All runtime options are environment-driven. Secrets MUST ONLY be supplied via en
 
 ### Build Docker Image
 ```bash
-docker build -t codesentinel:1.0.0 .
+docker build -t codesentinel:1.1.0 .
 ```
 
 ### Run Container
@@ -51,7 +51,7 @@ docker run -d \
   -e DEBUG=False \
   -e ALLOWED_ORIGINS="http://localhost:3000" \
   -e GROQ_API_KEY="your_groq_api_key_placeholder" \
-  codesentinel:1.0.0
+  codesentinel:1.1.0
 ```
 
 ---

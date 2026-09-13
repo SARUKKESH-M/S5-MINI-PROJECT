@@ -7,6 +7,7 @@ Ollama daemon using standard httpx, structured JSON mode, and zero LangChain dep
 import json
 import logging
 import os
+import threading
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -70,6 +71,42 @@ class OllamaLLMProvider(LLMProvider):
         self.model = model or "codellama"
         self.timeout = float(timeout)
 
+        self._client: Optional[httpx.Client] = None
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def _get_client(self) -> httpx.Client:
+        """Lazily initialize or return the thread-safe reusable httpx.Client."""
+        with self._lock:
+            if self._closed:
+                raise LLMProviderError("OllamaLLMProvider instance has been closed.")
+            if self._client is None or self._client.is_closed:
+                self._client = httpx.Client(timeout=self.timeout)
+            return self._client
+
+    def close(self) -> None:
+        """Deterministic cleanup of underlying pooled HTTP client."""
+        with self._lock:
+            self._closed = True
+            if self._client is not None:
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
+                self._client = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def _post_chat(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
         """Execute HTTP POST to Ollama /api/chat with format=json."""
         endpoint = f"{self.base_url}/api/chat"
@@ -86,8 +123,8 @@ class OllamaLLMProvider(LLMProvider):
         }
 
         try:
-            with httpx.Client(timeout=self.timeout) as client:
-                resp = client.post(endpoint, json=payload, headers=headers)
+            client = self._get_client()
+            resp = client.post(endpoint, json=payload, headers=headers)
 
             if resp.status_code == 404:
                 raise LLMProviderError(f"Ollama model '{self.model}' not found or endpoint missing.")
@@ -160,56 +197,65 @@ class OllamaLLMProvider(LLMProvider):
         return result
 
     def explain_findings(self, findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Enrich deterministic findings with Ollama-generated explanations and recommendations."""
+        """Enrich deterministic findings with Ollama-generated structured explanations."""
         if not findings:
             return []
 
-        finding_summaries = []
-        for f in findings:
-            finding_summaries.append({
-                "finding_id": f.get("finding_id", ""),
-                "title": f.get("title", ""),
-                "severity": f.get("severity", "unknown"),
-                "category": f.get("category", "Security"),
-                "description": f.get("description", ""),
-            })
-
-        system_msg = (
-            "You are a DevSecOps security expert. Review the security finding summaries and provide "
-            "a concise technical explanation and practical remediation recommendation for each finding. "
-            "Respond ONLY with a JSON object mapping 'explanations': [{\"finding_id\": \"...\", "
-            "\"explanation\": \"...\", \"recommendation\": \"...\"}]."
-        )
-        user_msg = f"Finding Summaries:\n{json.dumps(finding_summaries, indent=2)}"
-
-        clean_sys = sanitize_sensitive_text(system_msg)
-        clean_user = sanitize_sensitive_text(user_msg)
-
-        messages = [
-            {"role": "system", "content": clean_sys},
-            {"role": "user", "content": clean_user},
-        ]
-
-        resp = self._post_chat(messages)
-        explanation_items = resp.get("explanations", [])
-        if not isinstance(explanation_items, list):
-            explanation_items = []
-
-        exp_map = {item.get("finding_id"): item for item in explanation_items if isinstance(item, dict)}
+        try:
+            from llm.explanation_contract import (
+                validate_and_sanitize_explanation,
+                generate_deterministic_fallback_explanation,
+            )
+            from llm.prompts import EXPLANATION_SYSTEM_PROMPT, build_finding_explanation_prompt
+        except ImportError:
+            from explanation_contract import (
+                validate_and_sanitize_explanation,
+                generate_deterministic_fallback_explanation,
+            )
+            from prompts import EXPLANATION_SYSTEM_PROMPT, build_finding_explanation_prompt
 
         enriched: List[Dict[str, Any]] = []
+
         for f in findings:
             item = dict(f)
-            fid = item.get("finding_id")
-            matching_exp = exp_map.get(fid)
-            if matching_exp:
-                if matching_exp.get("explanation"):
-                    item["explanation"] = matching_exp["explanation"]
-                if matching_exp.get("recommendation"):
-                    item["recommendation"] = matching_exp["recommendation"]
+            orig_title = item.get("title")
+            orig_severity = item.get("severity")
+            orig_evidence = item.get("evidence")
+            orig_finding_id = item.get("finding_id")
 
-            if not item.get("recommendation"):
-                item["recommendation"] = "Review this security-sensitive operation and avoid untrusted dynamic input."
+            k_doc = item.get("_retrieved_knowledge_doc")
+            retrieved_knowledge = item.get("retrieved_knowledge") or ([k_doc] if k_doc else [])
+
+            user_prompt = build_finding_explanation_prompt(item, retrieved_knowledge=retrieved_knowledge)
+            clean_sys = sanitize_sensitive_text(EXPLANATION_SYSTEM_PROMPT)
+            clean_user = sanitize_sensitive_text(user_prompt)
+
+            messages = [
+                {"role": "system", "content": clean_sys},
+                {"role": "user", "content": clean_user},
+            ]
+
+            try:
+                raw_resp = self._post_chat(messages)
+                structured = validate_and_sanitize_explanation(raw_resp, item, provenance="ollama")
+            except Exception as exc:
+                logger.info("Ollama explanation failed for finding '%s' (%s). Using deterministic fallback.", orig_finding_id, exc)
+                structured = generate_deterministic_fallback_explanation(item, knowledge_doc=k_doc)
+                structured["provenance"] = "deterministic_fallback"
+
+            item["structured_explanation"] = structured
+            item["explanation"] = structured["why_it_matters"]
+            item["recommendation"] = structured["remediation"]
+
+            # Guarantee authoritative finding immutability
+            if orig_title is not None:
+                item["title"] = orig_title
+            if orig_severity is not None:
+                item["severity"] = orig_severity
+            if orig_evidence is not None:
+                item["evidence"] = orig_evidence
+            if orig_finding_id is not None:
+                item["finding_id"] = orig_finding_id
 
             enriched_by = list(item.get("enriched_by", []))
             if "ollama_llm" not in enriched_by:

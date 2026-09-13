@@ -52,3 +52,92 @@ def verify_github_webhook_signature(
         return hmac.compare_digest(expected_sig.lower(), received_sig.lower())
     except Exception:
         return False
+
+
+def claim_webhook_delivery(
+    delivery_id: str,
+    event_type: str,
+    now_iso: Optional[str] = None,
+    ttl_seconds: Optional[int] = None,
+    db_path: Optional[str] = None
+) -> bool:
+    """
+    Atomically claims a webhook delivery ID via AnalysisStore.
+    Returns True if successfully claimed, False if already claimed (unexpired duplicate).
+    """
+    clean_id = str(delivery_id or "").strip()
+    if not clean_id or clean_id.lower() in ("none", "unknown"):
+        return True
+
+    try:
+        from backend.analysis.storage.store import AnalysisStore
+    except ImportError:
+        try:
+            from analysis.storage.store import AnalysisStore
+        except ImportError:
+            return True
+
+    try:
+        store = AnalysisStore(db_path=db_path)
+        return store.claim_delivery(
+            delivery_id=clean_id,
+            event_type=event_type,
+            now_iso=now_iso,
+            ttl_seconds=ttl_seconds
+        )
+    except Exception:
+        return True
+
+
+def release_webhook_delivery(delivery_id: str, db_path: Optional[str] = None) -> bool:
+    """
+    Releases a claimed webhook delivery ID in case an unhandled error occurs during processing.
+    """
+    clean_id = str(delivery_id or "").strip()
+    if not clean_id or clean_id.lower() in ("none", "unknown"):
+        return False
+
+    try:
+        from backend.analysis.storage.store import AnalysisStore
+    except ImportError:
+        try:
+            from analysis.storage.store import AnalysisStore
+        except ImportError:
+            return False
+
+    try:
+        store = AnalysisStore(db_path=db_path)
+        return store.release_delivery(delivery_id=clean_id)
+    except Exception:
+        return False
+
+
+def release_pr_commit_reservation(
+    owner: str,
+    repository: str,
+    pr_number: int,
+    head_sha: str,
+    db_path: Optional[str] = None
+) -> bool:
+    """
+    Releases an in-progress PR commit reservation if an unhandled error occurs during analysis.
+    """
+    try:
+        from backend.analysis.storage.store import AnalysisStore
+    except ImportError:
+        try:
+            from analysis.storage.store import AnalysisStore
+        except ImportError:
+            return False
+
+    try:
+        store = AnalysisStore(db_path=db_path)
+        return store.release_pr_commit_reservation(
+            owner=owner,
+            repository=repository,
+            pr_number=pr_number,
+            head_sha=head_sha
+        )
+    except Exception:
+        return False
+
