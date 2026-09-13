@@ -11,9 +11,40 @@ export default function FindingCard({ finding, index }) {
   const category = finding.category || finding.rule_id || null;
   const description = finding.description || null;
   const filePath = finding.file_path || finding.file || null;
-  const lineNumber = finding.line_number ?? finding.line ?? null;
-  const codeSnippet = finding.code_snippet || finding.evidence || null;
-  const astSignal = finding.ast_signal || null;
+
+  // Extract line number from line_number, line, or evidence array
+  const firstEvidence = Array.isArray(finding.evidence) && finding.evidence.length > 0 ? finding.evidence[0] : null;
+  const lineNumber = finding.line_number ?? finding.line ?? firstEvidence?.line_start ?? null;
+
+  // Extract AST signal from explicit field or evidence object
+  const astSignal = finding.ast_signal || (
+    firstEvidence?.signal_name
+      ? `${firstEvidence.signal_name}${firstEvidence.signal_type ? ` (${firstEvidence.signal_type})` : ''}`
+      : null
+  );
+
+  // Safely normalize codeSnippet / evidence to string to prevent object rendering crash
+  let evidenceDisplay = null;
+  if (typeof finding.code_snippet === 'string' && finding.code_snippet.trim()) {
+    evidenceDisplay = finding.code_snippet;
+  } else if (Array.isArray(finding.evidence) && finding.evidence.length > 0) {
+    evidenceDisplay = finding.evidence.map((ev) => {
+      if (typeof ev === 'string') return ev;
+      if (typeof ev === 'object' && ev !== null) {
+        const parts = [];
+        if (ev.line_start) {
+          parts.push(`Line ${ev.line_start}${ev.line_end && ev.line_end !== ev.line_start ? `-${ev.line_end}` : ''}`);
+        }
+        if (ev.signal_name) parts.push(`Signal: ${ev.signal_name}`);
+        if (ev.signal_type) parts.push(`Type: ${ev.signal_type}`);
+        return parts.length > 0 ? parts.join(' | ') : JSON.stringify(ev);
+      }
+      return String(ev);
+    }).join('\n');
+  } else if (typeof finding.evidence === 'string' && finding.evidence.trim()) {
+    evidenceDisplay = finding.evidence;
+  }
+
   const remediation = finding.remediation || finding.recommendation || null;
   const confidence = finding.confidence !== undefined ? (
     typeof finding.confidence === 'number'
@@ -101,7 +132,7 @@ export default function FindingCard({ finding, index }) {
           )}
 
           {/* Code Snippet Evidence */}
-          {codeSnippet && (
+          {evidenceDisplay && (
             <div style={{ marginTop: '4px' }}>
               <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
                 Code Evidence
@@ -118,7 +149,7 @@ export default function FindingCard({ finding, index }) {
                   overflowX: 'auto',
                 }}
               >
-                <code>{codeSnippet}</code>
+                <code>{evidenceDisplay}</code>
               </pre>
             </div>
           )}

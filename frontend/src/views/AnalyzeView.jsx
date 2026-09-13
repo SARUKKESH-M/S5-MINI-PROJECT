@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import CodeEditor from '../components/CodeEditor';
 import FindingCard from '../components/FindingCard';
 import StatusBadge from '../components/StatusBadge';
+import SecurityToast from '../components/SecurityToast';
 import { analyzeSourceCode } from '../services/apiClient';
 
 const SAFE_EXAMPLE = `def add(a, b):
@@ -20,6 +21,8 @@ export default function AnalyzeView() {
   const [error, setError] = useState(null);
   const [analysisResult, setAnalysisResult] = useState(null);
   const [executionTimeMs, setExecutionTimeMs] = useState(null);
+  const [showToast, setShowToast] = useState(false);
+  const findingsSectionRef = useRef(null);
 
   const handleLoadSafe = () => {
     setSourceCode(SAFE_EXAMPLE);
@@ -35,6 +38,20 @@ export default function AnalyzeView() {
     setSourceCode('');
     setError(null);
     setAnalysisResult(null);
+    setShowToast(false);
+  };
+
+  const handleCloseToast = () => {
+    setShowToast(false);
+  };
+
+  const handleViewFindings = () => {
+    if (findingsSectionRef.current) {
+      findingsSectionRef.current.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      });
+    }
   };
 
   const handleAnalyze = async () => {
@@ -54,10 +71,18 @@ export default function AnalyzeView() {
       });
       const end = performance.now();
       setExecutionTimeMs(Math.round(end - start));
-      setAnalysisResult(res);
+      if (res?.status === 'error') {
+        setError(res.error_message || 'Analysis error returned by backend.');
+        setAnalysisResult(null);
+        setShowToast(false);
+      } else {
+        setAnalysisResult(res);
+        setShowToast(true);
+      }
     } catch (err) {
       setError(err.message || 'Analysis failed. Please ensure the backend is available.');
       setAnalysisResult(null);
+      setShowToast(false);
     } finally {
       setAnalyzing(false);
     }
@@ -66,7 +91,8 @@ export default function AnalyzeView() {
   // Derive security verdict from real backend response
   const summary = analysisResult?.summary || {};
   const findings = Array.isArray(analysisResult?.findings) ? analysisResult.findings : [];
-  const verdict = analysisResult?.review_status || summary._review_status || (
+  const rawVerdict = analysisResult?.verdict || analysisResult?.review_status || summary._review_status;
+  const verdict = rawVerdict ? String(rawVerdict).toUpperCase() : (
     (summary.critical_count > 0 || summary.high_count > 0) ? 'BLOCK' :
     (summary.medium_count > 0) ? 'REVIEW' : 'ALLOW'
   );
@@ -222,7 +248,7 @@ export default function AnalyzeView() {
               </div>
 
               {/* Findings List */}
-              <div>
+              <div ref={findingsSectionRef}>
                 <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '10px' }}>
                   Detailed Security Findings ({findings.length})
                 </div>
@@ -253,6 +279,17 @@ export default function AnalyzeView() {
           )}
         </div>
       </div>
+
+      {/* Security Gate Toast Notification */}
+      {showToast && analysisResult && (
+        <SecurityToast
+          key={analysisResult.analysis_id || Date.now()}
+          verdict={verdict}
+          findingCount={findings.length}
+          onViewFindings={handleViewFindings}
+          onClose={handleCloseToast}
+        />
+      )}
     </div>
   );
 }
