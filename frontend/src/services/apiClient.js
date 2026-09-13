@@ -6,7 +6,7 @@
  * Strictly communicates only with confirmed endpoints in the current backend.
  */
 
-const API_BASE_URL = '';
+const API_BASE_URL = (import.meta.env.VITE_BACKEND_URL || '').replace(/\/+$/, '');
 
 /**
  * Core fetch wrapper with JSON serialization and robust error normalization.
