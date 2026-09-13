@@ -1,30 +1,21 @@
 import React from 'react';
-import { Routes, Route } from 'react-router-dom';
-import ApplicationLayout from '../layouts/ApplicationLayout';
+import { Routes, Route, Navigate } from 'react-router-dom';
 
-import ProductEntryPage from '../pages/ProductEntryPage';
-import CommandCenterPage from '../pages/CommandCenterPage';
-import PRReviewPage from '../pages/PRReviewPage';
-import RepoIntelligencePage from '../pages/RepoIntelligencePage';
-import VulnerabilityExplorerPage from '../pages/VulnerabilityExplorerPage';
-import AIAnalysisPage from '../pages/AIAnalysisPage';
-import LearningCenterPage from '../pages/LearningCenterPage';
-import SystemHealthPage from '../pages/SystemHealthPage';
+import DashboardView from '../views/DashboardView';
+import AnalyzeView from '../views/AnalyzeView';
+import RepositoryView from '../views/RepositoryView';
+import HistoryView from '../views/HistoryView';
+import SystemView from '../views/SystemView';
 
 export default function AppRoutes() {
   return (
     <Routes>
-      <Route path="/" element={<ApplicationLayout />}>
-        <Route index element={<ProductEntryPage />} />
-        <Route path="command-center" element={<CommandCenterPage />} />
-        <Route path="pr-review" element={<PRReviewPage />} />
-        <Route path="repo-intelligence" element={<RepoIntelligencePage />} />
-        <Route path="vulnerability-explorer" element={<VulnerabilityExplorerPage />} />
-        <Route path="ai-analysis" element={<AIAnalysisPage />} />
-        <Route path="learning-center" element={<LearningCenterPage />} />
-        <Route path="system-health" element={<SystemHealthPage />} />
-        <Route path="*" element={<ProductEntryPage />} />
-      </Route>
+      <Route path="/" element={<DashboardView />} />
+      <Route path="/analyze" element={<AnalyzeView />} />
+      <Route path="/repositories" element={<RepositoryView />} />
+      <Route path="/history" element={<HistoryView />} />
+      <Route path="/system" element={<SystemView />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }
