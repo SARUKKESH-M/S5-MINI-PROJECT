@@ -11,6 +11,7 @@ export default function AppRoutes() {
   return (
     <Routes>
       <Route path="/" element={<DashboardView />} />
+      <Route path="/dashboard" element={<DashboardView />} />
       <Route path="/analyze" element={<AnalyzeView />} />
       <Route path="/repositories" element={<RepositoryView />} />
       <Route path="/history" element={<HistoryView />} />
