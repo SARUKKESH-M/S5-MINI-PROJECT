@@ -136,6 +136,11 @@ export async function getPlatformReadiness() {
   return apiGet('/platform/readiness');
 }
 
+/** Platform 6-series release readiness verification (GET /platform/readiness/release) */
+export async function getPlatformReleaseReadiness() {
+  return apiGet('/platform/readiness/release');
+}
+
 /** Platform capabilities and version info (GET /platform/info) */
 export async function getPlatformInfo() {
   return apiGet('/platform/info');

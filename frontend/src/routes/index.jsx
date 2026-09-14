@@ -9,13 +9,17 @@ import PullRequestsView from '../views/PullRequestsView';
 import SecurityReviewView from '../views/SecurityReviewView';
 import AnalyticsView from '../views/AnalyticsView';
 import SystemView from '../views/SystemView';
+import ToolsView from '../views/ToolsView';
+import SettingsView from '../views/SettingsView';
 import TopHeader from '../components/dashboard/TopHeader';
+import Breadcrumbs from '../components/common/Breadcrumbs';
 
 function PageLayout({ children }) {
   return (
     <div className="cs-main-content-workspace">
       <TopHeader />
-      <main className="cs-page-workspace" style={{ padding: '24px 32px', flex: 1, overflowY: 'auto' }}>
+      <main id="main-content" tabIndex={-1} className="cs-page-workspace" style={{ padding: '24px 32px', flex: 1, overflowY: 'auto' }}>
+        <Breadcrumbs />
         {children}
       </main>
     </div>
@@ -81,6 +85,22 @@ export default function AppRoutes() {
         element={
           <PageLayout>
             <SystemView />
+          </PageLayout>
+        }
+      />
+      <Route
+        path="/tools"
+        element={
+          <PageLayout>
+            <ToolsView />
+          </PageLayout>
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          <PageLayout>
+            <SettingsView />
           </PageLayout>
         }
       />

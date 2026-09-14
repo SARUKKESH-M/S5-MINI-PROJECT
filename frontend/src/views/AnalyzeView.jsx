@@ -339,8 +339,11 @@ export default function AnalyzeView() {
                   disabled={analyzing}
                   autoComplete="off"
                   spellCheck="false"
+                  aria-required="true"
+                  aria-invalid={Boolean(validationError)}
+                  aria-describedby={`repo-url-helper ${validationError ? 'validation-error-banner' : ''}`.trim()}
                 />
-                <span className="cs-form-helper">
+                <span id="repo-url-helper" className="cs-form-helper">
                   Supports GitHub repository HTTPS clone URLs or owner/repository slugs.
                 </span>
               </div>
@@ -485,7 +488,7 @@ export default function AnalyzeView() {
 
           {/* Validation Error Banner */}
           {validationError && (
-            <div className="alert-box alert-error" role="alert">
+            <div id="validation-error-banner" className="alert-box alert-error" role="alert">
               <div>
                 <strong>Validation Notice:</strong> {validationError}
               </div>

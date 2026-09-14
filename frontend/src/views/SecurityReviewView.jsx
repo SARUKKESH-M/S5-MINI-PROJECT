@@ -318,9 +318,28 @@ export default function SecurityReviewView() {
     setSortBy('severity-desc');
   };
 
+  const suppressTriggerRef = useRef(null);
+  const revokeTriggerRef = useRef(null);
+
+  // Escape key handler for active modals
+  useEffect(() => {
+    if (!suppressingFinding && !revokingFinding) return;
+
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape' && !actionSubmitting) {
+        e.preventDefault();
+        if (suppressingFinding) handleCloseSuppressModal();
+        if (revokingFinding) handleCloseRevokeModal();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [suppressingFinding, revokingFinding, actionSubmitting]);
+
   // Open Suppression Modal
   const handleOpenSuppressModal = (finding, e) => {
     if (e) e.stopPropagation();
+    suppressTriggerRef.current = e?.currentTarget || document.activeElement;
     setSuppressingFinding(finding);
     setReasonCode('FALSE_POSITIVE');
     setReasonComment('');
@@ -333,11 +352,17 @@ export default function SecurityReviewView() {
     if (actionSubmitting) return;
     setSuppressingFinding(null);
     setActionError(null);
+    setTimeout(() => {
+      if (suppressTriggerRef.current && typeof suppressTriggerRef.current.focus === 'function') {
+        suppressTriggerRef.current.focus();
+      }
+    }, 50);
   };
 
   // Open Revoke Modal
   const handleOpenRevokeModal = (finding, e) => {
     if (e) e.stopPropagation();
+    revokeTriggerRef.current = e?.currentTarget || document.activeElement;
     setRevokingFinding(finding);
     setActionError(null);
   };
@@ -347,6 +372,11 @@ export default function SecurityReviewView() {
     if (actionSubmitting) return;
     setRevokingFinding(null);
     setActionError(null);
+    setTimeout(() => {
+      if (revokeTriggerRef.current && typeof revokeTriggerRef.current.focus === 'function') {
+        revokeTriggerRef.current.focus();
+      }
+    }, 50);
   };
 
   // Submit Suppression

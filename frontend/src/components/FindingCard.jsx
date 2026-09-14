@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import StatusBadge from './StatusBadge';
 
-export default function FindingCard({ finding, index }) {
+export default function FindingCard({ finding, index, onInspect }) {
   const [expanded, setExpanded] = useState(true);
 
   if (!finding) return null;
@@ -103,6 +103,20 @@ export default function FindingCard({ finding, index }) {
             <span style={{ fontSize: '11px', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
               CONF: {confidence}
             </span>
+          )}
+          {onInspect && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              style={{ fontSize: '11px', padding: '2px 8px', color: '#4F46E5', borderColor: '#C7D2FE' }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onInspect(finding);
+              }}
+              aria-label={`Inspect details for ${title}`}
+            >
+              Inspect Details →
+            </button>
           )}
           <button
             type="button"

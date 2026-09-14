@@ -506,8 +506,11 @@ export default function RepositoryView() {
 
         <div className="cs-repo-form-grid" style={{ marginBottom: '16px' }}>
           <div style={{ minWidth: 0 }}>
-            <label className="form-label">GitHub HTTPS Repository URL</label>
+            <label htmlFor="cs-repo-url-input" className="form-label">
+              GitHub HTTPS Repository URL <span style={{ color: 'var(--sev-critical)' }}>*</span>
+            </label>
             <input
+              id="cs-repo-url-input"
               type="text"
               className="form-input"
               value={repoUrl}
@@ -515,12 +518,16 @@ export default function RepositoryView() {
               onKeyDown={handleInputKeyDown}
               placeholder="https://github.com/owner/repository"
               disabled={isProcessing}
+              aria-required="true"
+              aria-invalid={Boolean(error)}
+              aria-describedby={error ? 'cs-repo-error-banner' : undefined}
             />
           </div>
 
           <div style={{ minWidth: 0 }}>
-            <label className="form-label">Target Branch</label>
+            <label htmlFor="cs-branch-input" className="form-label">Target Branch</label>
             <input
+              id="cs-branch-input"
               type="text"
               className="form-input"
               value={branch}
@@ -532,8 +539,9 @@ export default function RepositoryView() {
           </div>
 
           <div style={{ minWidth: 0 }}>
-            <label className="form-label">Subpath (Optional)</label>
+            <label htmlFor="cs-subpath-input" className="form-label">Subpath (Optional)</label>
             <input
+              id="cs-subpath-input"
               type="text"
               className="form-input"
               value={subpath}
@@ -606,7 +614,7 @@ export default function RepositoryView() {
 
         {/* Error Alert */}
         {error && (
-          <div className="alert-box alert-error" style={{ marginTop: '16px', marginBottom: 0 }}>
+          <div id="cs-repo-error-banner" className="alert-box alert-error" role="alert" style={{ marginTop: '16px', marginBottom: 0 }}>
             <div>
               <strong>Error:</strong> {error}
             </div>

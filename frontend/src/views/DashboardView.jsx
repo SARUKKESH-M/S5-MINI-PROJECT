@@ -45,7 +45,7 @@ export default function DashboardView() {
       <TopHeader />
 
       {/* Main Workspace Scroll Area */}
-      <main className="cs-dashboard-workspace">
+      <main id="main-content" tabIndex={-1} className="cs-dashboard-workspace">
         {/* Hero Section */}
         <HeroBanner />
 

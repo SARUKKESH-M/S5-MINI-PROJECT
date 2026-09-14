@@ -27,13 +27,14 @@ const navItems = [
   { id: 'developers', label: 'Developers', icon: DevelopersIcon, path: '#' },
   { id: 'analytics', label: 'Analytics', icon: AnalyticsIcon, path: '/analytics' },
   { id: 'false-positives', label: 'False Positives', icon: FalsePositivesIcon, path: '#' },
-  { id: 'tools', label: 'Tools', icon: ToolsIcon, path: '#' },
-  { id: 'settings', label: 'Settings', icon: SettingsIcon, path: '#' },
+  { id: 'tools', label: 'Tools', icon: ToolsIcon, path: '/tools' },
+  { id: 'settings', label: 'Settings', icon: SettingsIcon, path: '/settings' },
 ];
 
 export default function Sidebar() {
   const [themeMode, setThemeMode] = useState('light');
   const location = useLocation();
+  const isDashboardRoute = location.pathname === '/' || location.pathname === '/dashboard';
 
   return (
     <aside className="cs-sidebar" aria-label="Sidebar Navigation">
@@ -74,7 +75,8 @@ export default function Sidebar() {
                   type="button"
                   className="cs-sidebar-link cs-sidebar-btn-link"
                   title={`${item.label} (Later Phase)`}
-                  aria-label={item.label}
+                  aria-label={`${item.label} (Available in later phase)`}
+                  aria-disabled="true"
                 >
                   <span className="cs-nav-icon">
                     <Icon size={17} />

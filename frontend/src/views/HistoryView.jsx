@@ -2,6 +2,8 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { getAnalyses, getAnalysis, deleteAnalysis } from '../services/apiClient';
 import FindingPreviewModal from '../components/dashboard/FindingPreviewModal';
+import ConfirmDialog from '../components/common/ConfirmDialog';
+import { useToast } from '../components/common/ToastContext';
 import StatusBadge from '../components/StatusBadge';
 import { CodeFileIcon } from '../components/dashboard/Icons';
 
@@ -31,6 +33,11 @@ export default function HistoryView() {
   const [selectedSeverity, setSelectedSeverity] = useState('ALL');
   const [sortBy, setSortBy] = useState('severity-desc');
   const [inspectingFinding, setInspectingFinding] = useState(null);
+
+  // Global UX: ConfirmDialog & Toast state
+  const toast = useToast();
+  const [deletingId, setDeletingId] = useState(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const fetchHistory = async (currentOffset = 0) => {
     setLoading(true);
@@ -84,18 +91,16 @@ export default function HistoryView() {
   }, [searchParams, location.state]);
 
   const handleSelectRecord = (analysisId) => {
-    if (selectedId === analysisId) {
-      // Deselect
-      handleCloseDetails();
-      return;
-    }
+    if (!analysisId) return;
+    setSelectedId(analysisId);
     setSearchParams({ id: analysisId });
+    fetchAnalysisDetail(analysisId);
   };
 
   const handleCloseDetails = () => {
-    setSearchParams({});
     setSelectedId(null);
     setSelectedRecord(null);
+    setSearchParams({});
     setDetailError(null);
     setDetailStatus(null);
     setSearchQuery('');
@@ -103,20 +108,26 @@ export default function HistoryView() {
     setSortBy('severity-desc');
   };
 
-  const handleDeleteRecord = async (analysisId, e) => {
+  const handleDeleteRecord = (analysisId, e) => {
     if (e) e.stopPropagation();
-    if (!window.confirm(`Are you sure you want to delete analysis '${analysisId}'?`)) {
-      return;
-    }
+    setDeletingId(analysisId);
+  };
 
+  const handleConfirmDelete = async () => {
+    if (!deletingId || isDeleting) return;
+    setIsDeleting(true);
     try {
-      await deleteAnalysis(analysisId);
-      if (selectedId === analysisId) {
+      await deleteAnalysis(deletingId);
+      toast.success(`Analysis '${deletingId.slice(0, 8)}...' permanently deleted.`);
+      if (selectedId === deletingId) {
         handleCloseDetails();
       }
       fetchHistory(offset);
     } catch (err) {
-      alert(`Delete failed: ${err.message}`);
+      toast.error(`Delete failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      setIsDeleting(false);
+      setDeletingId(null);
     }
   };
 
@@ -719,13 +730,13 @@ export default function HistoryView() {
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>Analysis ID</th>
-                      <th>Date / Time</th>
-                      <th>Target / Query</th>
-                      <th>Findings</th>
-                      <th>Verdict</th>
-                      <th>Status</th>
-                      <th style={{ textAlign: 'right' }}>Actions</th>
+                      <th scope="col">Analysis ID</th>
+                      <th scope="col">Date / Time</th>
+                      <th scope="col">Target / Query</th>
+                      <th scope="col">Findings</th>
+                      <th scope="col">Verdict</th>
+                      <th scope="col">Status</th>
+                      <th scope="col" style={{ textAlign: 'right' }}>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -769,6 +780,7 @@ export default function HistoryView() {
                               type="button"
                               className="btn btn-secondary btn-sm"
                               style={{ marginRight: '6px' }}
+                              aria-label={`View audit details for analysis ${id}`}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 handleSelectRecord(id);
@@ -779,6 +791,7 @@ export default function HistoryView() {
                             <button
                               type="button"
                               className="btn btn-danger btn-sm"
+                              aria-label={`Delete analysis record ${id}`}
                               onClick={(e) => handleDeleteRecord(id, e)}
                             >
                               Delete
@@ -814,6 +827,7 @@ export default function HistoryView() {
                     className="btn btn-secondary btn-sm"
                     onClick={handlePrev}
                     disabled={offset === 0}
+                    aria-label="Previous page of audit records"
                   >
                     ← Prev
                   </button>
@@ -822,6 +836,7 @@ export default function HistoryView() {
                     className="btn btn-secondary btn-sm"
                     onClick={handleNext}
                     disabled={offset + limit >= totalCount}
+                    aria-label="Next page of audit records"
                   >
                     Next →
                   </button>
@@ -831,6 +846,18 @@ export default function HistoryView() {
           )}
         </>
       )}
+
+      {/* Reusable Confirmation Dialog for Destructive Deletion */}
+      <ConfirmDialog
+        isOpen={Boolean(deletingId)}
+        isProcessing={isDeleting}
+        title="Delete Analysis Record"
+        message={`Are you sure you want to delete analysis '${deletingId}'? This action cannot be undone and will remove all associated security findings and telemetry.`}
+        confirmLabel="Delete Analysis"
+        isDestructive={true}
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setDeletingId(null)}
+      />
     </div>
   );
 }

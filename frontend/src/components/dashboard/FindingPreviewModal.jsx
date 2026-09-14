@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { CodeFileIcon } from './Icons';
 import StatusBadge from '../StatusBadge';
@@ -10,19 +10,60 @@ export default function FindingPreviewModal({
 }) {
   const navigate = useNavigate();
   const location = useLocation();
+  const dialogRef = useRef(null);
+  const closeBtnRef = useRef(null);
+  const previousFocusRef = useRef(null);
 
-  // Support Escape key to close modal
+  // Focus trap, Escape key support, and focus restoration
   useEffect(() => {
     if (!isOpen) return;
 
+    // Save previous focus trigger
+    previousFocusRef.current = document.activeElement;
+
+    // Focus close button on mount
+    const timer = setTimeout(() => {
+      closeBtnRef.current?.focus();
+    }, 50);
+
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
+        e.preventDefault();
         onClose?.();
+        return;
+      }
+
+      if (e.key === 'Tab' && dialogRef.current) {
+        const focusable = dialogRef.current.querySelectorAll(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        );
+        if (focusable.length === 0) return;
+
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+
+        if (e.shiftKey) {
+          if (document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else {
+          if (document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('keydown', handleKeyDown);
+      if (previousFocusRef.current && typeof previousFocusRef.current.focus === 'function') {
+        previousFocusRef.current.focus();
+      }
+    };
   }, [isOpen, onClose]);
 
   if (!isOpen || !finding) return null;
@@ -96,6 +137,7 @@ export default function FindingPreviewModal({
       aria-labelledby="cs-modal-title"
     >
       <div
+        ref={dialogRef}
         className="cs-modal-dialog"
         onClick={(e) => e.stopPropagation()}
         style={{ maxWidth: '680px' }}
@@ -153,6 +195,7 @@ export default function FindingPreviewModal({
             )}
           </div>
           <button
+            ref={closeBtnRef}
             type="button"
             className="cs-modal-close-btn"
             onClick={onClose}

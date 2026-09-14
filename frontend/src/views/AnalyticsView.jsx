@@ -525,9 +525,16 @@ export default function AnalyticsView() {
               className="card cs-metric-card cs-metric-card-interactive"
               style={{ padding: '16px', borderLeft: '4px solid #6366F1' }}
               onClick={() => navigate('/repositories')}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  navigate('/repositories');
+                }
+              }}
               role="button"
               tabIndex={0}
               title="Navigate to Repositories"
+              aria-label={`Repositories: ${totalRepositories} scanned & active`}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ fontSize: '12px', fontWeight: 600, color: '#64748B', textTransform: 'uppercase' }}>
@@ -546,9 +553,16 @@ export default function AnalyticsView() {
               className="card cs-metric-card cs-metric-card-interactive"
               style={{ padding: '16px', borderLeft: '4px solid #3B82F6' }}
               onClick={() => navigate('/history')}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  navigate('/history');
+                }
+              }}
               role="button"
               tabIndex={0}
               title="Navigate to Analysis History"
+              aria-label={`Total Analyses: ${totalAnalyses} persistent scan runs`}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ fontSize: '12px', fontWeight: 600, color: '#64748B', textTransform: 'uppercase' }}>
@@ -567,9 +581,16 @@ export default function AnalyticsView() {
               className="card cs-metric-card cs-metric-card-interactive"
               style={{ padding: '16px', borderLeft: '4px solid #F59E0B' }}
               onClick={() => navigate('/reviews')}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  navigate('/reviews');
+                }
+              }}
               role="button"
               tabIndex={0}
               title="Navigate to Security Review"
+              aria-label={`Total Findings: ${totalFindings} detected vulnerabilities`}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ fontSize: '12px', fontWeight: 600, color: '#64748B', textTransform: 'uppercase' }}>
@@ -588,9 +609,16 @@ export default function AnalyticsView() {
               className="card cs-metric-card cs-metric-card-interactive"
               style={{ padding: '16px', borderLeft: '4px solid #EF4444' }}
               onClick={() => navigate('/history')}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  navigate('/history');
+                }
+              }}
               role="button"
               tabIndex={0}
               title="Inspect blocked scans in history"
+              aria-label={`Blocked Gates: ${blockedCount} scans`}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ fontSize: '12px', fontWeight: 600, color: '#64748B', textTransform: 'uppercase' }}>
@@ -984,6 +1012,15 @@ export default function AnalyticsView() {
                             cursor: 'pointer',
                           }}
                           onClick={() => navigate('/repositories', { state: { repo: r.repository_id } })}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              navigate('/repositories', { state: { repo: r.repository_id } });
+                            }
+                          }}
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Inspect repository ${r.repository_id}, ${r.finding_count} findings`}
                           title={`Inspect ${r.repository_id}`}
                         >
                           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -1036,6 +1073,15 @@ export default function AnalyticsView() {
                             cursor: 'pointer',
                           }}
                           onClick={() => navigate('/repositories', { state: { repo: r.repository_id } })}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              navigate('/repositories', { state: { repo: r.repository_id } });
+                            }
+                          }}
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Inspect repository ${r.repository_id}, ${r.review_status_distribution?.block || 0} blocked analyses`}
                           title={`Inspect ${r.repository_id}`}
                         >
                           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -1090,13 +1136,13 @@ export default function AnalyticsView() {
                 <table className="cs-table" style={{ width: '100%', fontSize: '13px' }}>
                   <thead>
                     <tr>
-                      <th>Repository</th>
-                      <th>Total Scans</th>
-                      <th>Findings</th>
-                      <th>Gate Breakdown (Block / Rev / Allow)</th>
-                      <th>Critical / High</th>
-                      <th>Last Analysis</th>
-                      <th>Action</th>
+                      <th scope="col">Repository</th>
+                      <th scope="col">Total Scans</th>
+                      <th scope="col">Findings</th>
+                      <th scope="col">Gate Breakdown (Block / Rev / Allow)</th>
+                      <th scope="col">Critical / High</th>
+                      <th scope="col">Last Analysis</th>
+                      <th scope="col">Action</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1137,6 +1183,7 @@ export default function AnalyticsView() {
                               className="btn btn-secondary btn-sm"
                               onClick={() => navigate('/repositories', { state: { repo: repo.repository_id } })}
                               style={{ fontSize: '11px', padding: '3px 8px' }}
+                              aria-label={`Inspect repository ${repo.repository_id} in workspace`}
                             >
                               Inspect →
                             </button>
