@@ -44,7 +44,11 @@ const topFindingsList = [
   },
 ];
 
-export default function TopFindings({ findings = topFindingsList }) {
+export default function TopFindings({
+  findings = topFindingsList,
+  onSelectFinding = null,
+  selectedId = null,
+}) {
   const navigate = useNavigate();
   const items = Array.isArray(findings) && findings.length > 0 ? findings : topFindingsList;
 
@@ -55,32 +59,45 @@ export default function TopFindings({ findings = topFindingsList }) {
         <button
           type="button"
           className="cs-view-all-link-sm"
-          onClick={() => navigate('/analyze')}
+          onClick={() => navigate('/history')}
+          title="View all findings in audit history"
         >
           <span>View All</span>
           <span className="cs-arrow-icon">→</span>
         </button>
       </div>
 
-      <div className="cs-findings-items-list">
-        {items.map((item) => (
-          <div
-            key={item.id}
-            className="cs-finding-row-item"
-            style={{ borderLeftColor: item.color }}
-          >
-
-            <div className="cs-finding-item-info">
-              <span className={`cs-severity-pill cs-sev-${item.sevKey}`}>
-                {item.severity}
-              </span>
-              <span className="cs-finding-item-name" title={item.title}>
-                {item.title}
-              </span>
+      <div className="cs-findings-items-list" role="list">
+        {items.map((item) => {
+          const isSelected = selectedId && String(selectedId) === String(item.id);
+          return (
+            <div
+              key={item.id}
+              className={`cs-finding-row-item ${isSelected ? 'cs-finding-row-selected' : ''}`}
+              style={{ borderLeftColor: item.color, cursor: 'pointer' }}
+              onClick={() => onSelectFinding?.(item)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onSelectFinding?.(item);
+                }
+              }}
+              title={`Inspect ${item.title}`}
+            >
+              <div className="cs-finding-item-info">
+                <span className={`cs-severity-pill cs-sev-${item.sevKey}`}>
+                  {item.severity}
+                </span>
+                <span className="cs-finding-item-name" title={item.title}>
+                  {item.title}
+                </span>
+              </div>
+              <span className="cs-finding-item-count">{item.count}</span>
             </div>
-            <span className="cs-finding-item-count">{item.count}</span>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

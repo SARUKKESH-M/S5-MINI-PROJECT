@@ -1,7 +1,9 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import SecurityGateCard from './SecurityGateCard';
 import TopFindings from './TopFindings';
 import FindingPreview from './FindingPreview';
+import FindingPreviewModal from './FindingPreviewModal';
 import ProductionStatus from './ProductionStatus';
 
 export default function LatestAnalysisPanel({
@@ -10,6 +12,10 @@ export default function LatestAnalysisPanel({
   findingPreview = null,
   productionStatus = null,
 }) {
+  const navigate = useNavigate();
+  const [selectedFinding, setSelectedFinding] = useState(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
   const repoName = latestAnalysis?.repo || 'SARUKKESH-M/S5-MINI-PROJECT';
   const branch = latestAnalysis?.branch || 'main';
   const status = latestAnalysis?.status || 'Completed';
@@ -19,6 +25,21 @@ export default function LatestAnalysisPanel({
   const duration = latestAnalysis ? latestAnalysis.duration : '117.74s';
   const reviewStatus = latestAnalysis?.reviewStatus || 'BLOCK';
 
+  // The active finding displayed in the preview card
+  const currentPreview = selectedFinding || findingPreview;
+
+  const handleSelectFinding = (finding) => {
+    setSelectedFinding(finding);
+  };
+
+  const handleOpenModal = () => {
+    setIsModalOpen(true);
+  };
+
+  const handleCloseModal = () => {
+    setIsModalOpen(false);
+  };
+
   return (
     <div className="cs-latest-analysis-panel">
       {/* Panel Top Card */}
@@ -26,9 +47,28 @@ export default function LatestAnalysisPanel({
         <div className="cs-panel-overview-header">
           <div>
             <h3 className="cs-panel-title">Latest Analysis</h3>
-            <div className="cs-panel-repo-name">{repoName}</div>
+            <div
+              className="cs-panel-repo-name cs-clickable-link"
+              onClick={() => navigate('/repositories', { state: { repo: repoName, branch } })}
+              title="Inspect repository in Repositories view"
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  navigate('/repositories', { state: { repo: repoName, branch } });
+                }
+              }}
+            >
+              {repoName}
+            </div>
           </div>
-          <span className="cs-status-indicator-badge">
+          <span
+            className="cs-status-indicator-badge"
+            style={{ cursor: 'pointer' }}
+            onClick={() => navigate('/history', { state: { analysisId: latestAnalysis?.id } })}
+            title="Inspect in Audit History"
+          >
             <span className="cs-status-dot-green" />
             <span>{status}</span>
           </span>
@@ -50,11 +90,23 @@ export default function LatestAnalysisPanel({
 
         {/* 3 Metric Pills */}
         <div className="cs-panel-stat-pills">
-          <div className="cs-panel-pill">
+          <div
+            className="cs-panel-pill cs-panel-pill-interactive"
+            onClick={() => navigate('/repositories', { state: { repo: repoName, branch } })}
+            title="Inspect repository"
+            role="button"
+            tabIndex={0}
+          >
             <span className="cs-pill-value">{filesAnalyzed}</span>
             <span className="cs-pill-label">Files Analyzed</span>
           </div>
-          <div className="cs-panel-pill">
+          <div
+            className="cs-panel-pill cs-panel-pill-interactive"
+            onClick={() => navigate('/history', { state: { analysisId: latestAnalysis?.id } })}
+            title="Inspect findings in Audit History"
+            role="button"
+            tabIndex={0}
+          >
             <span className="cs-pill-value">{findingsCount}</span>
             <span className="cs-pill-label">Findings</span>
           </div>
@@ -66,16 +118,46 @@ export default function LatestAnalysisPanel({
       </div>
 
       {/* Security Gate Card */}
-      <SecurityGateCard gate={reviewStatus} />
+      <div
+        style={{ cursor: 'pointer' }}
+        onClick={() => navigate('/history')}
+        title="View security gate audit history"
+        role="button"
+        tabIndex={0}
+      >
+        <SecurityGateCard gate={reviewStatus} />
+      </div>
 
       {/* Top Findings */}
-      <TopFindings findings={latestFindings} />
+      <TopFindings
+        findings={latestFindings}
+        onSelectFinding={handleSelectFinding}
+        selectedId={currentPreview?.id}
+      />
 
       {/* Finding Preview */}
-      <FindingPreview preview={findingPreview} />
+      <FindingPreview
+        preview={currentPreview}
+        onOpenModal={handleOpenModal}
+      />
 
       {/* Production Status */}
-      <ProductionStatus status={productionStatus} />
+      <div
+        style={{ cursor: 'pointer' }}
+        onClick={() => navigate('/system')}
+        title="View System Diagnostics"
+        role="button"
+        tabIndex={0}
+      >
+        <ProductionStatus status={productionStatus} />
+      </div>
+
+      {/* Finding Preview Modal */}
+      <FindingPreviewModal
+        isOpen={isModalOpen}
+        onClose={handleCloseModal}
+        finding={currentPreview}
+      />
     </div>
   );
 }

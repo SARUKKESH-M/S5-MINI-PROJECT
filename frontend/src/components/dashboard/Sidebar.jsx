@@ -21,11 +21,11 @@ const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: DashboardIcon, path: '/' },
   { id: 'analyze', label: 'Analyze', icon: AnalyzeIcon, path: '/analyze' },
   { id: 'repositories', label: 'Repositories', icon: RepositoriesIcon, path: '/repositories' },
-  { id: 'pull-requests', label: 'Pull Requests', icon: PullRequestsIcon, path: '#' },
+  { id: 'pull-requests', label: 'Pull Requests', icon: PullRequestsIcon, path: '/pull-requests' },
   { id: 'vulnerabilities', label: 'Vulnerabilities', icon: VulnerabilitiesIcon, path: '#' },
-  { id: 'reviews', label: 'Reviews', icon: ReviewsIcon, path: '#' },
+  { id: 'reviews', label: 'Reviews', icon: ReviewsIcon, path: '/reviews' },
   { id: 'developers', label: 'Developers', icon: DevelopersIcon, path: '#' },
-  { id: 'analytics', label: 'Analytics', icon: AnalyticsIcon, path: '#' },
+  { id: 'analytics', label: 'Analytics', icon: AnalyticsIcon, path: '/analytics' },
   { id: 'false-positives', label: 'False Positives', icon: FalsePositivesIcon, path: '#' },
   { id: 'tools', label: 'Tools', icon: ToolsIcon, path: '#' },
   { id: 'settings', label: 'Settings', icon: SettingsIcon, path: '#' },
@@ -52,8 +52,9 @@ export default function Sidebar() {
       <nav className="cs-sidebar-nav" aria-label="Primary Navigation">
         {navItems.map((item) => {
           const Icon = item.icon;
-          const isDashboardRoute = location.pathname === '/' || location.pathname === '/dashboard';
-          const isSelected = item.id === 'dashboard' ? isDashboardRoute : location.pathname === item.path;
+          const isSelected = item.id === 'dashboard'
+            ? isDashboardRoute
+            : (item.path !== '#' && (location.pathname === item.path || location.pathname.startsWith(`${item.path}/`)));
 
           return (
             <div key={item.id} className="cs-nav-item-wrapper">
@@ -113,7 +114,12 @@ export default function Sidebar() {
         </div>
 
         {/* System Status Details */}
-        <div className="cs-sidebar-system-info">
+        <NavLink
+          to="/system"
+          className={({ isActive }) => `cs-sidebar-system-info cs-sidebar-system-link ${isActive ? 'active' : ''}`}
+          title="Inspect System Status & Diagnostics"
+          aria-label="System Diagnostics"
+        >
           <div className="cs-system-header">
             <span className="cs-system-title">CodeSentinel</span>
             <span className="cs-system-version">v1.1.0</span>
@@ -122,7 +128,7 @@ export default function Sidebar() {
             <span className="cs-status-indicator-dot" />
             <span className="cs-status-text">Production</span>
           </div>
-        </div>
+        </NavLink>
       </div>
     </aside>
   );

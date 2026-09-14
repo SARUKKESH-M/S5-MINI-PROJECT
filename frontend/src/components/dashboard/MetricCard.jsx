@@ -1,4 +1,5 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   RepositoriesIcon,
   AnalyzeIcon,
@@ -15,6 +16,8 @@ const metricsData = [
     trend: '+20% from last month',
     icon: RepositoriesIcon,
     colorScheme: 'indigo',
+    path: '/repositories',
+    tooltip: 'View connected repositories',
   },
   {
     id: 'analyses',
@@ -23,6 +26,8 @@ const metricsData = [
     trend: '+32% from last month',
     icon: AnalyzeIcon,
     colorScheme: 'blue',
+    path: '/history',
+    tooltip: 'View analysis history & audit trail',
   },
   {
     id: 'findings',
@@ -31,6 +36,8 @@ const metricsData = [
     trend: '+12% from last month',
     icon: VulnerabilitiesIcon,
     colorScheme: 'amber',
+    path: '/analytics',
+    tooltip: 'View findings analytics and severity distributions',
   },
   {
     id: 'blocked',
@@ -39,10 +46,14 @@ const metricsData = [
     trend: '+5% from last month',
     icon: ShieldAlertIcon,
     colorScheme: 'rose',
+    path: '/analytics',
+    tooltip: 'Inspect security gate analytics and blocked deployments',
   },
 ];
 
 export default function MetricCardsGrid({ metrics = null }) {
+  const navigate = useNavigate();
+
   const cards = metricsData.map((item) => {
     let cardValue = item.value;
     let cardTrend = item.trend;
@@ -79,7 +90,20 @@ export default function MetricCardsGrid({ metrics = null }) {
       {cards.map((item) => {
         const Icon = item.icon;
         return (
-          <div key={item.id} className={`cs-metric-card cs-metric-${item.colorScheme}`}>
+          <div
+            key={item.id}
+            className={`cs-metric-card cs-metric-${item.colorScheme} cs-metric-card-interactive`}
+            onClick={() => navigate(item.path)}
+            title={item.tooltip}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                navigate(item.path);
+              }
+            }}
+          >
             <div className="cs-metric-card-top">
               <span className="cs-metric-title">{item.title}</span>
               <div className={`cs-metric-icon-badge cs-badge-${item.colorScheme}`}>

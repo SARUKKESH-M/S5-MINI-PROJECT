@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { RepositoriesIcon, MoreDotsIcon } from './Icons';
 
@@ -62,7 +62,19 @@ const recentAnalysesData = [
 
 export default function RecentAnalysesTable({ data = recentAnalysesData }) {
   const navigate = useNavigate();
+  const [activeMenuId, setActiveMenuId] = useState(null);
   const rows = Array.isArray(data) && data.length > 0 ? data : recentAnalysesData;
+
+  // Close action popover when clicking anywhere outside
+  useEffect(() => {
+    const handleOutsideClick = () => {
+      setActiveMenuId(null);
+    };
+    if (activeMenuId) {
+      window.addEventListener('click', handleOutsideClick);
+    }
+    return () => window.removeEventListener('click', handleOutsideClick);
+  }, [activeMenuId]);
 
   return (
     <div id="recent-analyses-table" className="cs-table-card">
@@ -74,7 +86,8 @@ export default function RecentAnalysesTable({ data = recentAnalysesData }) {
         <button
           type="button"
           className="cs-view-all-link"
-          onClick={() => navigate('/repositories')}
+          onClick={() => navigate('/history')}
+          title="View all analyses in audit history"
         >
           <span>View All</span>
           <span className="cs-arrow-icon">→</span>
@@ -96,10 +109,31 @@ export default function RecentAnalysesTable({ data = recentAnalysesData }) {
           </thead>
           <tbody>
             {rows.map((row) => (
-              <tr key={row.id} className="cs-table-row">
+              <tr
+                key={row.id}
+                className="cs-table-row cs-table-row-interactive"
+                onClick={() => navigate(`/history?id=${row.id}`, { state: { analysisId: row.id } })}
+                title={`Inspect analysis ${row.id}`}
+              >
 
                 <td className="cs-td-repo">
-                  <div className="cs-repo-cell">
+                  <div
+                    className="cs-repo-cell cs-clickable-link"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigate('/repositories', { state: { repo: row.repo, branch: row.branch } });
+                    }}
+                    title={`Inspect repository ${row.repo}`}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        navigate('/repositories', { state: { repo: row.repo, branch: row.branch } });
+                      }
+                    }}
+                  >
                     <span className="cs-repo-icon-slot">
                       <RepositoriesIcon size={16} color="#6366F1" />
                     </span>
@@ -146,11 +180,15 @@ export default function RecentAnalysesTable({ data = recentAnalysesData }) {
                 </td>
 
                 <td className="cs-td-actions">
-                  <div className="cs-actions-cell">
+                  <div className="cs-actions-cell" style={{ position: 'relative' }}>
                     <button
                       type="button"
                       className="cs-action-view-btn"
-                      onClick={() => navigate('/analyze')}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigate(`/history?id=${row.id}`, { state: { analysisId: row.id } });
+                      }}
+                      title="Inspect analysis details"
                     >
                       View
                     </button>
@@ -159,9 +197,62 @@ export default function RecentAnalysesTable({ data = recentAnalysesData }) {
                       className="cs-action-menu-btn"
                       title="More actions"
                       aria-label="More actions"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveMenuId(activeMenuId === row.id ? null : row.id);
+                      }}
                     >
                       <MoreDotsIcon size={16} color="#94A3B8" />
                     </button>
+
+                    {/* Popover Action Menu */}
+                    {activeMenuId === row.id && (
+                      <div
+                        className="cs-action-popover"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <button
+                          type="button"
+                          className="cs-popover-item"
+                          onClick={() => {
+                            setActiveMenuId(null);
+                            navigate(`/history?id=${row.id}`, { state: { analysisId: row.id } });
+                          }}
+                        >
+                          Audit in History
+                        </button>
+                        <button
+                          type="button"
+                          className="cs-popover-item"
+                          onClick={() => {
+                            setActiveMenuId(null);
+                            navigate('/repositories', { state: { repo: row.repo, branch: row.branch } });
+                          }}
+                        >
+                          Scan Repository
+                        </button>
+                        <button
+                          type="button"
+                          className="cs-popover-item"
+                          onClick={() => {
+                            setActiveMenuId(null);
+                            navigate('/analyze');
+                          }}
+                        >
+                          Open Code Editor
+                        </button>
+                        <button
+                          type="button"
+                          className="cs-popover-item"
+                          onClick={() => {
+                            navigator.clipboard?.writeText(String(row.id));
+                            setActiveMenuId(null);
+                          }}
+                        >
+                          Copy ID
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </td>
               </tr>

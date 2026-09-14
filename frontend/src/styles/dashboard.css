@@ -1589,3 +1589,1090 @@
     display: none;
   }
 }
+
+/* ==========================================================================
+   Phase 4 — Interaction & Navigation Enhancements
+   ========================================================================== */
+
+/* Metric Cards Hover & Pointer */
+.cs-metric-card-interactive {
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.cs-metric-card-interactive:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.06);
+}
+
+/* Table Interactive Row */
+.cs-table-row-interactive {
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.cs-table-row-interactive:hover {
+  background-color: #F8FAFC;
+}
+
+/* Clickable Links */
+.cs-clickable-link {
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.cs-clickable-link:hover {
+  color: #4F46E5 !important;
+  text-decoration: underline;
+}
+
+/* Panel Pill Interactive */
+.cs-panel-pill-interactive {
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cs-panel-pill-interactive:hover {
+  background-color: #EEF2FF;
+  border-color: #C7D2FE;
+}
+
+/* Finding Row Selected State */
+.cs-finding-row-selected {
+  background-color: #F1F5F9;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+/* Action Popover */
+.cs-action-popover {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  margin-top: 6px;
+  z-index: 50;
+  background-color: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  border-radius: 8px;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.12), 0 8px 10px -6px rgba(0, 0, 0, 0.08);
+  padding: 5px;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: csFadeIn 0.15s ease;
+}
+
+.cs-popover-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #334155;
+  border: none;
+  background: transparent;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.cs-popover-item:hover {
+  background-color: #F1F5F9;
+  color: #0F172A;
+}
+
+/* TopHeader Popovers */
+.cs-notifications-popover,
+.cs-profile-dropdown {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  margin-top: 8px;
+  z-index: 60;
+  background-color: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  border-radius: 10px;
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.12), 0 10px 10px rgba(0, 0, 0, 0.06);
+  min-width: 250px;
+  padding: 6px;
+  animation: csFadeIn 0.15s ease;
+}
+
+.cs-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #0F172A;
+  border-bottom: 1px solid #F1F5F9;
+}
+
+.cs-badge-pill-online {
+  font-size: 10px;
+  background-color: rgba(16, 185, 129, 0.12);
+  color: #10B981;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.cs-notifications-list {
+  padding: 6px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cs-notification-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  transition: background-color 0.12s ease;
+}
+
+.cs-notification-item:hover {
+  background-color: #F8FAFC;
+}
+
+.cs-notif-title {
+  font-weight: 600;
+  color: #1E293B;
+  font-size: 12px;
+}
+
+.cs-notif-time {
+  font-size: 11px;
+  color: #64748B;
+  margin-top: 1px;
+}
+
+.cs-popover-footer {
+  padding: 6px 8px;
+  border-top: 1px solid #F1F5F9;
+}
+
+.cs-popover-footer-btn {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: #4F46E5;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 6px;
+  text-align: center;
+  border-radius: 4px;
+  transition: background-color 0.12s ease;
+}
+
+.cs-popover-footer-btn:hover {
+  background-color: #EEF2FF;
+}
+
+.cs-dropdown-user-header {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  color: #0F172A;
+}
+
+.cs-dropdown-divider {
+  height: 1px;
+  background-color: #F1F5F9;
+  margin: 4px 0;
+}
+
+.cs-dropdown-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  color: #334155;
+  border: none;
+  background: transparent;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.cs-dropdown-item:hover {
+  background-color: #F1F5F9;
+  color: #0F172A;
+}
+
+/* Sidebar System Link */
+.cs-sidebar-system-link {
+  text-decoration: none;
+  color: inherit;
+  display: block;
+  border-radius: 6px;
+  padding: 6px 8px;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.cs-sidebar-system-link:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.cs-sidebar-system-link.active {
+  background-color: rgba(99, 102, 241, 0.15);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+}
+
+/* Finding Preview Modal */
+.cs-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(15, 23, 42, 0.65);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+  animation: csFadeIn 0.2s ease;
+}
+
+.cs-modal-dialog {
+  background-color: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  border-radius: 12px;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.2), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+  max-width: 620px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  animation: csScaleUp 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.cs-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid #E2E8F0;
+}
+
+.cs-modal-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cs-modal-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #0F172A;
+  margin: 0;
+}
+
+.cs-modal-close-btn {
+  border: none;
+  background: transparent;
+  font-size: 18px;
+  color: #64748B;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 4px 8px;
+  transition: all 0.12s ease;
+}
+
+.cs-modal-close-btn:hover {
+  background-color: #F1F5F9;
+  color: #0F172A;
+}
+
+.cs-modal-body {
+  padding: 20px;
+}
+
+.cs-modal-finding-name {
+  font-size: 16px;
+  font-weight: 700;
+  color: #0F172A;
+}
+
+.cs-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-top: 1px solid #E2E8F0;
+  background-color: #F8FAFC;
+  border-radius: 0 0 12px 12px;
+}
+
+.cs-code-block-banner {
+  font-size: 9.5px;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  color: #94A3B8;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+@keyframes csFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes csScaleUp {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* ==========================================================================
+   Phase 5 — Analysis Experience Workspace Styles
+   ========================================================================== */
+
+.cs-analyze-tabs {
+  display: flex;
+  gap: 4px;
+  background-color: #F1F5F9;
+  padding: 3px;
+  border-radius: 8px;
+  border: 1px solid #E2E8F0;
+}
+
+.cs-analyze-tab-btn {
+  border: none;
+  background: transparent;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: #64748B;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: inherit;
+}
+
+.cs-analyze-tab-btn:hover:not(:disabled) {
+  color: #0F172A;
+}
+
+.cs-analyze-tab-btn.active {
+  background-color: #FFFFFF;
+  color: #0F172A;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.cs-analyze-tab-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.cs-form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cs-form-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1E293B;
+}
+
+.cs-form-input {
+  padding: 9px 12px;
+  border-radius: 6px;
+  border: 1px solid #CBD5E1;
+  background-color: #FFFFFF;
+  font-size: 13px;
+  color: #0F172A;
+  font-family: inherit;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.cs-form-input:focus {
+  outline: none;
+  border-color: #6366F1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+
+.cs-form-input:disabled {
+  background-color: #F8FAFC;
+  color: #94A3B8;
+  cursor: not-allowed;
+}
+
+.cs-form-helper {
+  font-size: 11px;
+  color: #64748B;
+}
+
+/* Honest Pulse Shield Animation */
+.cs-pulse-shield-indicator {
+  position: relative;
+  width: 60px;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+}
+
+.cs-pulse-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid #6366F1;
+  animation: csPulseRing 1.8s cubic-bezier(0.24, 0, 0.38, 1) infinite;
+}
+
+@keyframes csPulseRing {
+  0% {
+    transform: scale(0.7);
+    opacity: 0.8;
+  }
+  50% {
+    transform: scale(1.2);
+    opacity: 0.3;
+  }
+  100% {
+    transform: scale(1.4);
+    opacity: 0;
+  }
+}
+
+/* ==========================================================================
+   Phase 6 — Analysis Details & Findings Explorer Styles
+   ========================================================================== */
+
+.cs-analysis-details-view {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  animation: csFadeIn 0.2s ease;
+}
+
+.cs-breadcrumb-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 14px 18px;
+  background-color: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  border-radius: 10px;
+}
+
+.cs-breadcrumb-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.cs-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background-color: #F1F5F9;
+  border: 1px solid #CBD5E1;
+  color: #334155;
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.cs-back-btn:hover {
+  background-color: #E2E8F0;
+  color: #0F172A;
+}
+
+.cs-analysis-summary-card {
+  background-color: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  border-radius: 12px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.cs-analysis-summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #F1F5F9;
+}
+
+.cs-gate-highlight {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.cs-gate-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #64748B;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cs-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+}
+
+.cs-summary-stat-box {
+  background-color: #F8FAFC;
+  border: 1px solid #E2E8F0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cs-summary-stat-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748B;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cs-summary-stat-value {
+  font-size: 14px;
+  font-weight: 700;
+  color: #0F172A;
+  word-break: break-all;
+}
+
+.cs-severity-breakdown-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px;
+}
+
+.cs-severity-card-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 12px 10px;
+  border-radius: 8px;
+  border: 1px solid #E2E8F0;
+  background-color: #FFFFFF;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: inherit;
+}
+
+.cs-severity-card-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+}
+
+.cs-severity-card-btn.active {
+  box-shadow: 0 0 0 2px #6366F1;
+}
+
+.cs-sev-card-crit { border-top: 3px solid #EF4444; }
+.cs-sev-card-crit.active { background-color: rgba(239, 68, 68, 0.05); }
+
+.cs-sev-card-high { border-top: 3px solid #F97316; }
+.cs-sev-card-high.active { background-color: rgba(249, 115, 22, 0.05); }
+
+.cs-sev-card-med { border-top: 3px solid #F59E0B; }
+.cs-sev-card-med.active { background-color: rgba(245, 158, 11, 0.05); }
+
+.cs-sev-card-low { border-top: 3px solid #06B6D4; }
+.cs-sev-card-low.active { background-color: rgba(6, 182, 212, 0.05); }
+
+.cs-sev-card-info { border-top: 3px solid #64748B; }
+.cs-sev-card-info.active { background-color: rgba(100, 116, 139, 0.05); }
+
+.cs-severity-card-num {
+  font-size: 18px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: #0F172A;
+}
+
+.cs-severity-card-lbl {
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748B;
+  text-transform: uppercase;
+}
+
+/* Findings Explorer Section */
+.cs-findings-explorer-card {
+  background-color: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  border-radius: 12px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.cs-explorer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 14px;
+  background-color: #F8FAFC;
+  border: 1px solid #E2E8F0;
+  border-radius: 8px;
+}
+
+.cs-explorer-controls-left {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  flex: 1;
+}
+
+.cs-explorer-search-wrapper {
+  position: relative;
+  min-width: 240px;
+  flex: 1;
+  max-width: 380px;
+}
+
+.cs-explorer-search-input {
+  width: 100%;
+  padding: 7px 28px 7px 10px;
+  border-radius: 6px;
+  border: 1px solid #CBD5E1;
+  background-color: #FFFFFF;
+  font-size: 13px;
+  color: #0F172A;
+  font-family: inherit;
+}
+
+.cs-explorer-search-input:focus {
+  outline: none;
+  border-color: #6366F1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+
+.cs-explorer-search-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  color: #94A3B8;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 4px;
+}
+
+.cs-explorer-select {
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid #CBD5E1;
+  background-color: #FFFFFF;
+  font-size: 12.5px;
+  color: #334155;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.cs-explorer-select:focus {
+  outline: none;
+  border-color: #6366F1;
+}
+
+.cs-explorer-counts-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+  color: #64748B;
+  padding: 0 2px;
+}
+
+.cs-findings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cs-finding-row-card {
+  background-color: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  border-radius: 8px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.cs-finding-row-card:hover {
+  border-color: #CBD5E1;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+}
+
+.cs-finding-row-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.cs-finding-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cs-finding-row-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #0F172A;
+  margin: 0;
+}
+
+.cs-finding-inspect-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border-radius: 5px;
+  border: 1px solid #CBD5E1;
+  background-color: #F8FAFC;
+  color: #0284C7;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  white-space: nowrap;
+}
+
+.cs-finding-inspect-btn:hover {
+  background-color: #E0F2FE;
+  border-color: #7DD3FC;
+  color: #0369A1;
+}
+
+.cs-filter-empty-box {
+  text-align: center;
+  padding: 36px 20px;
+  background-color: #F8FAFC;
+  border: 1px dashed #CBD5E1;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ==========================================================================
+   Phase 7 — Repository Management & Administration Styles
+   ========================================================================== */
+
+.cs-repo-workspace-view {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  animation: csFadeIn 0.2s ease;
+}
+
+.cs-repo-form-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr;
+  gap: 14px;
+}
+
+@media (max-width: 900px) {
+  .cs-repo-form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.cs-repo-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.cs-repo-meta-box {
+  background-color: #F8FAFC;
+  border: 1px solid #E2E8F0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cs-repo-meta-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748B;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cs-repo-meta-value {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #0F172A;
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+.cs-repo-retention-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background-color: #F8FAFC;
+  border: 1px solid #E2E8F0;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #64748B;
+}
+
+.cs-repo-actions-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+/* ==========================================================================
+   Phase 8 — GitHub / Pull Request Integration Styles
+   ========================================================================== */
+
+.cs-pr-workspace-view {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  animation: csFadeIn 0.2s ease;
+}
+
+.cs-pr-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.cs-pr-meta-box {
+  background-color: #F8FAFC;
+  border: 1px solid #E2E8F0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cs-pr-meta-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748B;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cs-pr-meta-value {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #0F172A;
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+.cs-pr-webhook-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.04) 0%, rgba(14, 165, 233, 0.04) 100%);
+  border: 1px solid #E2E8F0;
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.cs-pr-endpoint-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  background-color: #0F172A;
+  color: #38BDF8;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  border-radius: 6px;
+}
+
+.cs-pr-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  background-color: #F1F5F9;
+  color: #475569;
+}
+
+/* ==========================================================================
+   Phase 9 — Security Review & Finding Management Styles
+   ========================================================================== */
+
+.cs-textarea {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-family: var(--font-sans);
+  color: #0F172A;
+  background-color: #FFFFFF;
+  border: 1px solid #CBD5E1;
+  border-radius: 6px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.cs-textarea:focus {
+  border-color: #6366F1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+
+.cs-select {
+  padding: 6px 10px;
+  font-size: 12.5px;
+  font-family: var(--font-sans);
+  color: #0F172A;
+  background-color: #FFFFFF;
+  border: 1px solid #CBD5E1;
+  border-radius: 6px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.cs-select:focus {
+  border-color: #6366F1;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+}
+
+.cs-review-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cs-review-status-open {
+  background-color: #FEF2F2;
+  color: #B91C1C;
+  border: 1px solid #FECACA;
+}
+
+.cs-review-status-suppressed {
+  background-color: #EEF2FF;
+  color: #4338CA;
+  border: 1px solid #C7D2FE;
+}
+
+.cs-suppression-audit-box {
+  padding: 10px 14px;
+  background-color: #EEF2FF;
+  border: 1px solid #C7D2FE;
+  border-radius: 6px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+@media (max-width: 768px) {
+  .cs-breadcrumb-bar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .cs-explorer-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .cs-explorer-controls-left {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .cs-explorer-search-wrapper {
+    width: 100% !important;
+  }
+
+  .cs-summary-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+
+  .cs-finding-row-top {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .cs-finding-row-meta {
+    width: 100%;
+  }
+
+  .cs-modal-dialog {
+    max-width: 95vw !important;
+    margin: 10px;
+  }
+}
+
+@media (max-width: 480px) {
+  .cs-summary-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .cs-severity-breakdown-bar {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

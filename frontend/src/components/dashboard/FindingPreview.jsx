@@ -2,7 +2,7 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CodeFileIcon } from './Icons';
 
-export default function FindingPreview({ preview = null }) {
+export default function FindingPreview({ preview = null, onOpenModal = null }) {
   const navigate = useNavigate();
 
   const title = preview?.title || 'Command Injection Risk';
@@ -57,7 +57,13 @@ export default function FindingPreview({ preview = null }) {
       <button
         type="button"
         className="cs-preview-details-btn"
-        onClick={() => navigate('/analyze')}
+        onClick={() => {
+          if (onOpenModal) {
+            onOpenModal();
+          } else {
+            navigate('/analyze');
+          }
+        }}
       >
         <span>View Full Details</span>
         <span className="cs-arrow-icon">→</span>
