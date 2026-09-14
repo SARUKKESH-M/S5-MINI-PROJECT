@@ -70,7 +70,7 @@ export default function RepositoryView() {
       });
       setAcquisitionData(acqRes);
 
-      const acqId = acqRes.acquisition_id;
+      const acqId = acqRes.acquisition_id || acqRes.acquisition?.acquisition_id;
       if (!acqId) {
         throw new Error('Acquisition succeeded but no acquisition_id was returned.');
       }
