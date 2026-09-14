@@ -7,6 +7,7 @@ Step 6H security analyzer execution, finding aggregation, Step 6J analysis persi
 and Step 6T platform capabilities (Policy profiles, Scope exclusion, Incremental analysis, Cache, Metrics).
 """
 
+import gc
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -15,6 +16,10 @@ from ast_engine.rag_adapter import prepare_ast_documents_for_rag
 from ast_engine.evidence_normalizer import normalize_security_evidence
 from rag.ingestion import ingest_documents
 from rag.vector_store import DEFAULT_COLLECTION_NAME
+try:
+    from rag.context_builder import MAX_CONTEXT_DOCUMENTS
+except ImportError:
+    MAX_CONTEXT_DOCUMENTS = 20
 from backend.analysis.storage.store import AnalysisStore
 from backend.analysis.deterministic_findings import generate_deterministic_findings
 from backend.analysis.finding_enrichment import enrich_findings
@@ -220,7 +225,36 @@ def analyze_repository(
                 # Malformed JavaScript source must not crash the entire repository analysis
                 pass
 
-    # 5. Clear stale AST evidence & Ingest fresh repository AST documents into RAG vector store
+    # 5. Generate deterministic findings from all extracted AST security evidence FIRST
+    # Deterministic AST rules are strictly authoritative; RAG and LLM operate advisory only.
+    raw_findings = generate_deterministic_findings(all_security_evidence)
+
+    # Explicitly release large raw file collections that are no longer required
+    del raw_read_files
+    del scope_included_files
+    del final_files
+    gc.collect()
+
+    # 6. Filter transient repository AST documents to only evidence-associated documents
+    actionable_evidence_ids = {
+        str(f.get("evidence_id")) for f in raw_findings if f.get("evidence_id")
+    }
+
+    filtered_ast_docs: List[Dict[str, Any]] = [
+        doc for doc in all_ast_docs
+        if str(doc.get("metadata", {}).get("evidence_id", "")) in actionable_evidence_ids
+    ]
+
+    # Bounded transient RAG safety cap: aligned with MAX_CONTEXT_DOCUMENTS (20).
+    # Governs advisory RAG vector enrichment context only; deterministic findings remain 100% authoritative and uncapped.
+    if len(filtered_ast_docs) > MAX_CONTEXT_DOCUMENTS:
+        filtered_ast_docs = filtered_ast_docs[:MAX_CONTEXT_DOCUMENTS]
+
+    # Explicitly release full AST documents list
+    del all_ast_docs
+    gc.collect()
+
+    # 7. Clear stale AST evidence & Ingest only relevant AST documents into transient RAG collection
     try:
         from rag.vector_store import initialize_vector_store
         v_client = initialize_vector_store()
@@ -231,14 +265,17 @@ def analyze_repository(
     except Exception:
         pass
 
-    if all_ast_docs:
+    if filtered_ast_docs:
         try:
-            ingest_documents(all_ast_docs, collection_name=DEFAULT_COLLECTION_NAME)
+            ingest_documents(filtered_ast_docs, collection_name=DEFAULT_COLLECTION_NAME)
         except Exception:
             pass
 
-    # 6. Deterministic findings precede optional per-category RAG enrichment.
-    raw_findings = generate_deterministic_findings(all_security_evidence)
+    # Explicitly release filtered AST documents once ingested
+    del filtered_ast_docs
+    gc.collect()
+
+    # 8. Enrich deterministic findings (Curated OWASP + RAG context + LLM explanation)
     enriched_findings = enrich_findings(raw_findings, db_path=db_path)
     valid_doc_ids = {str(item.get("evidence_id")) for item in all_security_evidence if item.get("evidence_id")}
 
