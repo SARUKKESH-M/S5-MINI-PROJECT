@@ -8,6 +8,7 @@ import {
 } from '../services/apiClient';
 import HealthCard from '../components/HealthCard';
 import StatusBadge from '../components/StatusBadge';
+import PageHeader from '../components/common/PageHeader';
 
 export default function SystemView() {
   const [loading, setLoading] = useState(true);
@@ -78,34 +79,27 @@ export default function SystemView() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
       {/* Header */}
-      <div className="card" style={{ padding: '20px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
-          <div>
-            <h1 style={{ fontSize: '20px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '4px' }}>
-              System Health & Capabilities
-            </h1>
-            <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
-              Real-time component health checks, operational readiness probes, and security analysis policy profiles.
-            </p>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            {lastRefreshed && (
-              <span style={{ fontSize: '12px', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-                Updated: {lastRefreshed}
-              </span>
-            )}
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={fetchSystemDiagnostics}
-              disabled={loading}
-            >
-              ↻ Refresh Health
-            </button>
-          </div>
-        </div>
-      </div>
+      <PageHeader
+        title="System Health & Capabilities"
+        description="Real-time component health checks, operational readiness probes, and security analysis policy profiles."
+        primaryAction={
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={fetchSystemDiagnostics}
+            disabled={loading}
+          >
+            ↻ Refresh Health
+          </button>
+        }
+        secondaryAction={
+          lastRefreshed ? (
+            <span style={{ fontSize: '12px', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+              Updated: {lastRefreshed}
+            </span>
+          ) : null
+        }
+      />
 
       {error && (
         <div className="alert-box alert-error">

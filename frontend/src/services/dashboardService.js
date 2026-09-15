@@ -620,18 +620,16 @@ export async function fetchDashboardData() {
   const fallback = createDashboardFallbackData();
 
   try {
-    // 1. Fire independent initial requests concurrently
+    // 1. Fire independent initial requests concurrently (deduplicated analyses fetch)
     const [
       summarySettled,
       repoAnalyticsSettled,
-      recentAnalysesSettled,
-      trendAnalysesSettled,
+      analysesSettled,
       healthSettled,
       infoSettled,
     ] = await Promise.allSettled([
       getAnalyticsSummary({ timeWindow: 'all' }),
       getRepositoryAnalytics({ timeWindow: 'all', limit: 20 }),
-      getAnalyses({ limit: 5, offset: 0 }),
       getAnalyses({ limit: 100, offset: 0 }),
       getPlatformHealth(),
       getPlatformInfo(),
@@ -639,10 +637,18 @@ export async function fetchDashboardData() {
 
     const summaryData = summarySettled.status === 'fulfilled' ? summarySettled.value : null;
     const repoAnalyticsData = repoAnalyticsSettled.status === 'fulfilled' ? repoAnalyticsSettled.value : null;
-    const recentAnalysesData = recentAnalysesSettled.status === 'fulfilled' ? recentAnalysesSettled.value : null;
-    const trendAnalysesData = trendAnalysesSettled.status === 'fulfilled' ? trendAnalysesSettled.value : null;
+    const analysesData = analysesSettled.status === 'fulfilled' ? analysesSettled.value : null;
     const healthData = healthSettled.status === 'fulfilled' ? healthSettled.value : null;
     const infoData = infoSettled.status === 'fulfilled' ? infoSettled.value : null;
+
+    // Derive recentAnalysesData (first 5) and trendAnalysesData from the single authoritative response
+    const recentAnalysesData = analysesData
+      ? {
+          ...analysesData,
+          analyses: Array.isArray(analysesData.analyses) ? analysesData.analyses.slice(0, 5) : [],
+        }
+      : null;
+    const trendAnalysesData = analysesData;
 
     // 2. Fetch detailed analysis for the newest item if available
     let detailedAnalysis = null;

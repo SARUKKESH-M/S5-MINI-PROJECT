@@ -183,6 +183,14 @@ export default function PullRequestsView() {
     }
   };
 
+  // Listen to repo filter from URL or navigation state
+  useEffect(() => {
+    const rawRepo = searchParams.get('repo') || location.state?.repo;
+    if (rawRepo) {
+      setRepoFilter(String(rawRepo).trim());
+    }
+  }, [searchParams, location.state]);
+
   // Distinct repositories for filter dropdown
   const distinctRepos = useMemo(() => {
     const repos = new Set();
@@ -211,7 +219,11 @@ export default function PullRequestsView() {
       }
 
       // Repository filter
-      if (repoFilter !== 'ALL' && repoName !== repoFilter) {
+      if (
+        repoFilter !== 'ALL' &&
+        !repoName.toLowerCase().includes(repoFilter.toLowerCase()) &&
+        !repoFilter.toLowerCase().includes(repoName.toLowerCase())
+      ) {
         return false;
       }
 
@@ -685,19 +697,7 @@ export default function PullRequestsView() {
               </div>
 
               {/* Severity Counters Bar */}
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
-                  gap: '8px',
-                  padding: '12px',
-                  backgroundColor: 'var(--bg-void)',
-                  borderRadius: 'var(--radius-sm)',
-                  border: '1px solid var(--border-subtle)',
-                  textAlign: 'center',
-                  margin: '18px 0',
-                }}
-              >
+              <div className="cs-severity-breakdown-bar" style={{ margin: '18px 0' }}>
                 <div>
                   <div style={{ fontSize: '10px', color: 'var(--sev-critical)', fontFamily: 'var(--font-mono)' }}>CRIT</div>
                   <strong style={{ fontSize: '15px', color: 'var(--sev-critical)' }}>{activePrMeta.summary.critical_count ?? 0}</strong>

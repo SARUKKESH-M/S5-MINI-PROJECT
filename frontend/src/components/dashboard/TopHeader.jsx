@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useSidebar } from './SidebarContext';
 import { SearchIcon, BellIcon, GitHubIcon, ChevronDownIcon } from './Icons';
 import { getAnalyses, getPlatformHealth } from '../../services/apiClient';
 
@@ -18,6 +19,7 @@ const WORKSPACE_TARGETS = [
 
 export default function TopHeader() {
   const navigate = useNavigate();
+  const { toggleSidebar, isOpen: isSidebarOpen } = useSidebar();
   const searchInputRef = useRef(null);
   const searchContainerRef = useRef(null);
   const notifBtnRef = useRef(null);
@@ -215,6 +217,20 @@ export default function TopHeader() {
 
   return (
     <header className="cs-top-header">
+      {/* Mobile Hamburger Menu Toggle Button */}
+      <button
+        type="button"
+        className="cs-mobile-menu-btn"
+        onClick={toggleSidebar}
+        aria-label={isSidebarOpen ? 'Close navigation menu' : 'Open navigation menu'}
+        aria-expanded={isSidebarOpen}
+        title="Toggle navigation sidebar"
+      >
+        <span className="cs-mobile-menu-icon" aria-hidden="true">
+          {isSidebarOpen ? '✕' : '☰'}
+        </span>
+      </button>
+
       {/* Left Search Bar with Integrated Live Dropdown */}
       <div className="cs-header-search-wrapper" ref={searchContainerRef} style={{ position: 'relative' }}>
         <span className="cs-search-icon-slot">

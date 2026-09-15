@@ -19,6 +19,7 @@ import {
   getVulnerabilityAnalytics,
   getSuppressionAnalytics,
   getAnalyses,
+  getDeveloperAnalytics,
 } from '../services/apiClient';
 import StatusBadge from '../components/StatusBadge';
 import {
@@ -84,6 +85,7 @@ export default function AnalyticsView() {
   const [vulnerabilitiesData, setVulnerabilitiesData] = useState([]);
   const [suppressionsData, setSuppressionsData] = useState(null);
   const [recentAnalyses, setRecentAnalyses] = useState([]);
+  const [developerData, setDeveloperData] = useState([]);
 
   const isRefreshingRef = useRef(false);
 
@@ -108,12 +110,16 @@ export default function AnalyticsView() {
       const suppParams = { timeWindow };
       if (repositoryFilter) suppParams.repositoryId = repositoryFilter;
 
-      const [summaryRes, repoRes, vulnRes, suppRes, analysesRes] = await Promise.allSettled([
+      const devParams = { time_window: timeWindow, limit: 20 };
+      if (repositoryFilter) devParams.repository = repositoryFilter;
+
+      const [summaryRes, repoRes, vulnRes, suppRes, analysesRes, devRes] = await Promise.allSettled([
         getAnalyticsSummary(summaryParams),
         getRepositoryAnalytics({ timeWindow, limit: 50 }),
         getVulnerabilityAnalytics(vulnParams),
         getSuppressionAnalytics(suppParams),
         getAnalyses({ limit: 100, offset: 0 }),
+        getDeveloperAnalytics(devParams),
       ]);
 
       if (summaryRes.status === 'fulfilled' && summaryRes.value) {
@@ -144,6 +150,12 @@ export default function AnalyticsView() {
         setRecentAnalyses(Array.isArray(analysesRes.value.analyses) ? analysesRes.value.analyses : []);
       } else {
         setRecentAnalyses([]);
+      }
+
+      if (devRes.status === 'fulfilled' && devRes.value && Array.isArray(devRes.value.developers)) {
+        setDeveloperData(devRes.value.developers);
+      } else {
+        setDeveloperData([]);
       }
     } catch (err) {
       setError(sanitizeErrorMessage(err.message || 'Failed to load security analytics.'));
@@ -677,7 +689,7 @@ export default function AnalyticsView() {
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 290px), 1fr))',
               gap: '16px',
             }}
           >
@@ -887,7 +899,7 @@ export default function AnalyticsView() {
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 300px), 1fr))',
               gap: '16px',
             }}
           >
@@ -1197,7 +1209,85 @@ export default function AnalyticsView() {
             )}
           </div>
 
-          {/* Section E: Recent Security Activity Feed */}
+          {/* Section E: Developer Security Telemetry & Attribution */}
+          <div className="card" style={{ padding: '20px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap', gap: '8px' }}>
+              <div>
+                <h3 style={{ fontSize: '15px', fontWeight: 700, color: '#0F172A', margin: 0 }}>
+                  Developer Security Telemetry & Attribution
+                </h3>
+                <span style={{ fontSize: '11.5px', color: '#64748B' }}>
+                  Authoritative security findings and gate decisions aggregated from analysis author records
+                </span>
+              </div>
+              <span style={{ fontSize: '12px', fontFamily: 'var(--font-mono)', color: '#64748B' }}>
+                {developerData.length > 0 ? `${developerData.length} attributed developers` : 'Authoritative Attribution Only'}
+              </span>
+            </div>
+
+            {developerData.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '32px 16px', color: '#94A3B8' }}>
+                <div style={{ fontSize: '24px', marginBottom: '6px' }}>👤</div>
+                <div style={{ fontSize: '13px', fontWeight: 600, color: '#0F172A' }}>No Author Attribution Recorded</div>
+                <div style={{ fontSize: '12px', maxWidth: '520px', margin: '4px auto 0', lineHeight: 1.4, color: '#64748B' }}>
+                  Analyses in this scope do not contain author attribution metadata. When analyses are executed with author or commit metadata, developer-level security telemetry will be reported here.
+                </div>
+                <div style={{ fontSize: '11px', color: '#94A3B8', marginTop: '6px', fontStyle: 'italic' }}>
+                  CodeSentinel strictly reports authoritative data and does not fabricate developer metrics, velocity formulas, or commit counts.
+                </div>
+              </div>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table className="cs-table" style={{ width: '100%', fontSize: '13px' }}>
+                  <thead>
+                    <tr>
+                      <th scope="col">Developer</th>
+                      <th scope="col">Total Analyses</th>
+                      <th scope="col">Total Findings</th>
+                      <th scope="col">Gate Distribution (Block / Rev / Allow)</th>
+                      <th scope="col">Critical / High</th>
+                      <th scope="col">Associated Repositories</th>
+                      <th scope="col">Last Activity</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {developerData.map((dev) => (
+                      <tr key={dev.developer}>
+                        <td style={{ fontWeight: 600, color: '#0F172A' }}>
+                          <span style={{ fontFamily: 'var(--font-mono)' }}>{dev.developer}</span>
+                        </td>
+                        <td style={{ fontFamily: 'var(--font-mono)' }}>{dev.total_analyses}</td>
+                        <td style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: dev.total_findings > 0 ? '#EF4444' : '#10B981' }}>
+                          {dev.total_findings}
+                        </td>
+                        <td>
+                          <span style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
+                            <span style={{ color: '#EF4444', fontWeight: 600 }}>{dev.block_count || 0}</span> /{' '}
+                            <span style={{ color: '#F59E0B', fontWeight: 600 }}>{dev.review_count || 0}</span> /{' '}
+                            <span style={{ color: '#10B981', fontWeight: 600 }}>{dev.allow_count || 0}</span>
+                          </span>
+                        </td>
+                        <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
+                          <span style={{ color: '#EF4444', fontWeight: 600 }}>{dev.critical_count || 0}</span> /{' '}
+                          <span style={{ color: '#F97316', fontWeight: 600 }}>{dev.high_count || 0}</span>
+                        </td>
+                        <td style={{ fontSize: '12px', color: '#475569' }}>
+                          {Array.isArray(dev.repositories) && dev.repositories.length > 0
+                            ? dev.repositories.join(', ')
+                            : '—'}
+                        </td>
+                        <td style={{ fontSize: '11.5px', color: '#64748B' }}>
+                          {dev.last_activity ? new Date(dev.last_activity).toLocaleDateString() : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Section F: Recent Security Activity Feed */}
           <div className="card" style={{ padding: '20px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap', gap: '8px' }}>
               <div>

@@ -2928,3 +2928,236 @@
 .cs-error-state-card {
   border-radius: var(--radius-md, 8px);
 }
+
+/* ==========================================================================
+   Phase 16 — Responsive & Accessibility Hardening
+   ========================================================================== */
+
+/* Page Workspace Container */
+.cs-page-workspace {
+  padding: 24px 32px;
+  flex: 1;
+  overflow-y: auto;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+/* Mobile Navigation Drawer & Hamburger Trigger */
+.cs-mobile-menu-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  min-width: 38px;
+  min-height: 38px;
+  background: var(--bg-card, #FFFFFF);
+  border: 1px solid var(--border-subtle, #E2E8F0);
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-primary, #0F172A);
+  font-size: 18px;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.cs-mobile-menu-btn:hover {
+  background-color: var(--bg-surface-hover, #F1F5F9);
+}
+
+.cs-mobile-menu-btn:focus-visible {
+  outline: 2px solid #6366F1;
+  outline-offset: 2px;
+}
+
+.cs-sidebar-mobile-close {
+  display: none;
+  margin-left: auto;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: #94A3B8;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.cs-sidebar-mobile-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #F8FAFC;
+}
+
+.cs-sidebar-backdrop {
+  display: none;
+}
+
+/* Responsive Grid Primitives */
+.cs-analyze-grid-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.cs-form-2col-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.cs-severity-breakdown-bar {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  padding: 12px;
+  background-color: var(--bg-void, #F8FAFC);
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border-subtle, #E2E8F0);
+  text-align: center;
+  margin-bottom: 16px;
+}
+
+/* Tablet & Mobile Breakpoints (<= 900px, <= 768px, <= 640px, <= 480px) */
+@media (max-width: 900px) {
+  .cs-analyze-grid-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  /* Mobile menu button visible */
+  .cs-mobile-menu-btn {
+    display: inline-flex;
+  }
+
+  /* Sidebar drawer behavior */
+  .cs-sidebar {
+    position: fixed !important;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    height: 100vh !important;
+    z-index: 1500 !important;
+    width: 260px !important;
+    min-width: 260px !important;
+    max-width: 82vw !important;
+    transform: translateX(-100%);
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.45);
+  }
+
+  .cs-sidebar.cs-sidebar-open {
+    transform: translateX(0);
+  }
+
+  .cs-sidebar-mobile-close {
+    display: flex;
+  }
+
+  .cs-sidebar-backdrop {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(15, 23, 42, 0.65);
+    backdrop-filter: blur(3px);
+    z-index: 1400;
+  }
+
+  /* Workspace padding */
+  .cs-page-workspace {
+    padding: 16px 14px;
+  }
+
+  .cs-dashboard-workspace {
+    padding: 14px 12px 28px !important;
+  }
+
+  /* TopHeader compacting */
+  .cs-top-header {
+    padding: 0 14px;
+    gap: 10px;
+  }
+
+  .cs-header-search-wrapper {
+    max-width: 100%;
+    flex: 1;
+  }
+
+  /* Popover positioning safety */
+  .cs-notifications-popover,
+  .cs-profile-dropdown {
+    max-width: calc(100vw - 24px) !important;
+    width: min(320px, calc(100vw - 24px));
+  }
+
+  .cs-search-dropdown-menu {
+    max-width: calc(100vw - 24px) !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .cs-search-shortcut-badge {
+    display: none !important;
+  }
+
+  .cs-user-info {
+    display: none !important;
+  }
+
+  .cs-form-2col-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .cs-severity-breakdown-bar {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 480px) {
+  .cs-top-header {
+    padding: 0 10px;
+    gap: 8px;
+  }
+
+  .cs-page-workspace {
+    padding: 12px 8px;
+  }
+
+  .cs-dashboard-workspace {
+    padding: 12px 8px 24px !important;
+  }
+
+  .cs-severity-breakdown-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cs-modal-dialog {
+    max-width: 96vw !important;
+    margin: 8px !important;
+    padding: 14px !important;
+  }
+}
+
+/* Accessibility: Ensure minimum interactive touch targets */
+button,
+a,
+input,
+select,
+textarea {
+  touch-action: manipulation;
+}
+
+/* Keyboard accessibility: ensure scrollable containers can be focused and navigated */
+.table-container:focus-visible,
+.cs-table-responsive-wrapper:focus-visible {
+  outline: 2px solid #6366F1;
+  outline-offset: 1px;
+}

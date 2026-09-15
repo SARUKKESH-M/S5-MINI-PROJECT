@@ -362,13 +362,32 @@ export default function RepositoryView() {
     (summary.medium_count > 0) ? 'REVIEW' : 'ALLOW'
   );
 
-  // Filtered monitored repositories for table
+  // Monitored repository aggregate insights (Authoritative, strictly from SQLite)
+  const repoInsights = useMemo(() => {
+    const totalRepos = monitoredRepos.length;
+    const totalAnalyses = monitoredRepos.reduce((acc, r) => acc + (r.analysis_count || 0), 0);
+    const totalFindings = monitoredRepos.reduce((acc, r) => acc + (r.finding_count || 0), 0);
+    const attentionCount = monitoredRepos.filter(
+      (r) => (r.critical_count || 0) > 0 || (r.high_count || 0) > 0 || ((r.review_status_distribution?.block || 0) > 0)
+    ).length;
+    const cleanCount = monitoredRepos.filter(
+      (r) => (r.finding_count || 0) === 0 && ((r.review_status_distribution?.block || 0) === 0)
+    ).length;
+    return { totalRepos, totalAnalyses, totalFindings, attentionCount, cleanCount };
+  }, [monitoredRepos]);
+
+  // Filtered monitored repositories for table (supports name, owner/name, or gate verdict)
   const filteredMonitored = useMemo(() => {
     if (!repoSearch.trim()) return monitoredRepos;
     const q = repoSearch.toLowerCase().trim();
-    return monitoredRepos.filter((r) =>
-      String(r.repository_id || '').toLowerCase().includes(q)
-    );
+    return monitoredRepos.filter((r) => {
+      const id = String(r.repository_id || '').toLowerCase();
+      const dist = r.review_status_distribution || {};
+      const isBlocked = (dist.block ?? 0) > 0 || (r.critical_count ?? 0) > 0;
+      const isReview = (dist.review ?? 0) > 0 || (r.medium_count ?? 0) > 0;
+      const gate = isBlocked ? 'block' : isReview ? 'review' : 'allow';
+      return id.includes(q) || gate.includes(q);
+    });
   }, [monitoredRepos, repoSearch]);
 
   // Find latest analysis matching current repo URL if available
@@ -740,19 +759,7 @@ export default function RepositoryView() {
           </div>
 
           {/* Severity Counters */}
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
-              gap: '8px',
-              padding: '12px',
-              backgroundColor: 'var(--bg-void)',
-              borderRadius: 'var(--radius-sm)',
-              border: '1px solid var(--border-subtle)',
-              textAlign: 'center',
-              marginBottom: '16px',
-            }}
-          >
+          <div className="cs-severity-breakdown-bar">
             <div>
               <div style={{ fontSize: '10px', color: 'var(--sev-critical)', fontFamily: 'var(--font-mono)' }}>CRIT</div>
               <strong style={{ fontSize: '15px', color: 'var(--sev-critical)' }}>{summary.critical_count ?? 0}</strong>
@@ -820,6 +827,51 @@ export default function RepositoryView() {
           />
         </div>
 
+        {/* Authoritative Repository Posture Overview Chips */}
+        {monitoredRepos.length > 0 && (
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+              gap: '10px',
+              marginBottom: '16px',
+            }}
+          >
+            <div className="cs-repo-meta-box">
+              <span className="cs-repo-meta-label">Monitored Repos</span>
+              <span className="cs-repo-meta-value">{repoInsights.totalRepos}</span>
+            </div>
+            <div className="cs-repo-meta-box">
+              <span className="cs-repo-meta-label">Total Analyses</span>
+              <span className="cs-repo-meta-value">{repoInsights.totalAnalyses}</span>
+            </div>
+            <div
+              className="cs-repo-meta-box"
+              style={{
+                borderColor: repoInsights.attentionCount > 0 ? '#FECACA' : '#E2E8F0',
+                backgroundColor: repoInsights.attentionCount > 0 ? '#FEF2F2' : '#F8FAFC',
+              }}
+            >
+              <span
+                className="cs-repo-meta-label"
+                style={{ color: repoInsights.attentionCount > 0 ? '#DC2626' : '#64748B' }}
+              >
+                Requires Attention
+              </span>
+              <span
+                className="cs-repo-meta-value"
+                style={{ color: repoInsights.attentionCount > 0 ? '#DC2626' : '#0F172A' }}
+              >
+                {repoInsights.attentionCount}
+              </span>
+            </div>
+            <div className="cs-repo-meta-box" style={{ borderColor: '#D1FAE5', backgroundColor: '#F0FDF4' }}>
+              <span className="cs-repo-meta-label" style={{ color: '#059669' }}>Clean Posture</span>
+              <span className="cs-repo-meta-value" style={{ color: '#059669' }}>{repoInsights.cleanCount}</span>
+            </div>
+          </div>
+        )}
+
         {loadError && (
           <div className="alert-box alert-error" style={{ marginBottom: '16px' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', flexWrap: 'wrap', gap: '8px' }}>
@@ -874,8 +926,8 @@ export default function RepositoryView() {
                 <tr>
                   <th>Repository Identifier</th>
                   <th>Analyses</th>
-                  <th>Total Findings</th>
-                  <th>Risk Distribution</th>
+                  <th>Finding Posture & Severities</th>
+                  <th>Gate Verdict & Breakdown</th>
                   <th>Last Analysis</th>
                   <th style={{ textAlign: 'right' }}>Actions</th>
                 </tr>
@@ -887,6 +939,7 @@ export default function RepositoryView() {
                   const isBlocked = (dist.block ?? 0) > 0 || (repo.critical_count ?? 0) > 0;
                   const isReview = (dist.review ?? 0) > 0 || (repo.medium_count ?? 0) > 0;
                   const gateVerdict = isBlocked ? 'BLOCK' : isReview ? 'REVIEW' : 'ALLOW';
+                  const requiresAttention = isBlocked || (repo.high_count ?? 0) > 0;
 
                   const matchingAnalysis = Array.isArray(recentAnalyses)
                     ? recentAnalyses.find((a) => {
@@ -898,19 +951,56 @@ export default function RepositoryView() {
 
                   return (
                     <tr key={id}>
-                      <td style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: '#0284C7' }}>
-                        {id}
+                      <td>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                            <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: '#0284C7' }}>
+                              {id}
+                            </span>
+                            {requiresAttention && (
+                              <span
+                                style={{
+                                  fontSize: '10px',
+                                  fontWeight: 700,
+                                  padding: '1px 6px',
+                                  borderRadius: '4px',
+                                  backgroundColor: '#FEF2F2',
+                                  color: '#DC2626',
+                                  border: '1px solid #FECACA',
+                                  fontFamily: 'var(--font-mono)',
+                                  letterSpacing: '0.3px',
+                                }}
+                                title="Authoritative condition: Repository has BLOCK analyses or Critical/High findings"
+                              >
+                                ATTENTION
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </td>
                       <td style={{ fontFamily: 'var(--font-mono)' }}>
                         {repo.analysis_count ?? 0}
                       </td>
-                      <td style={{ fontFamily: 'var(--font-mono)' }}>
-                        <span style={{ color: (repo.finding_count ?? 0) > 0 ? '#EF4444' : '#10B981', fontWeight: 600 }}>
-                          {repo.finding_count ?? 0}
-                        </span>
+                      <td>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                          <span style={{ fontFamily: 'var(--font-mono)', color: (repo.finding_count ?? 0) > 0 ? '#EF4444' : '#10B981', fontWeight: 700 }}>
+                            {repo.finding_count ?? 0} total
+                          </span>
+                          <div style={{ display: 'flex', gap: '6px', fontSize: '11px', fontFamily: 'var(--font-mono)' }}>
+                            <span style={{ color: '#EF4444' }} title="Critical findings count">C:{repo.critical_count ?? 0}</span>
+                            <span style={{ color: '#F97316' }} title="High findings count">H:{repo.high_count ?? 0}</span>
+                            <span style={{ color: '#F59E0B' }} title="Medium findings count">M:{repo.medium_count ?? 0}</span>
+                            <span style={{ color: '#06B6D4' }} title="Low findings count">L:{repo.low_count ?? 0}</span>
+                          </div>
+                        </div>
                       </td>
                       <td>
-                        <StatusBadge status={gateVerdict} />
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                          <StatusBadge status={gateVerdict} />
+                          <span style={{ fontSize: '10.5px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                            B:{dist.block ?? 0} · R:{dist.review ?? 0} · A:{dist.allow ?? 0}
+                          </span>
+                        </div>
                       </td>
                       <td style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
                         {repo.last_analysis_timestamp
@@ -918,48 +1008,78 @@ export default function RepositoryView() {
                           : '—'}
                       </td>
                       <td style={{ textAlign: 'right' }}>
-                        <button
-                          type="button"
-                          className="btn btn-secondary btn-sm"
-                          style={{ marginRight: '6px' }}
-                          onClick={() => handleSelectMonitoredRepo(repo)}
-                          title="Load this repository into the workspace configuration"
-                        >
-                          Configure
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-secondary btn-sm"
-                          style={{ marginRight: '6px' }}
-                          onClick={() => {
-                            const full = id.startsWith('http') ? id : (id === 'default' ? 'https://github.com/SARUKKESH-M/S5-MINI-PROJECT' : `https://github.com/${id}`);
-                            navigate('/analyze', {
-                              state: {
-                                repo: full,
-                                repoUrl: full,
-                                repository_url: full,
-                                branch: 'main',
-                              },
-                            });
-                          }}
-                          title="Open repository in dedicated Analyze Studio"
-                        >
-                          Analyze →
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-secondary btn-sm"
-                          onClick={() => {
-                            if (matchingAnalysis?.analysis_id) {
-                              navigate(`/history?id=${encodeURIComponent(matchingAnalysis.analysis_id)}`);
-                            } else {
-                              navigate('/history');
-                            }
-                          }}
-                          title={matchingAnalysis ? `View analysis ${matchingAnalysis.analysis_id} in history` : 'View audit history'}
-                        >
-                          Audit History →
-                        </button>
+                        <div style={{ display: 'inline-flex', flexWrap: 'wrap', gap: '4px', justifyContent: 'flex-end' }}>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => handleSelectMonitoredRepo(repo)}
+                            title="Load this repository into the workspace configuration"
+                          >
+                            Configure
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => {
+                              const full = id.startsWith('http') ? id : (id === 'default' ? 'https://github.com/SARUKKESH-M/S5-MINI-PROJECT' : `https://github.com/${id}`);
+                              navigate('/analyze', {
+                                state: {
+                                  repo: full,
+                                  repoUrl: full,
+                                  repository_url: full,
+                                  branch: 'main',
+                                },
+                              });
+                            }}
+                            title="Open repository in dedicated Analyze Studio"
+                          >
+                            Analyze →
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => {
+                              if (matchingAnalysis?.analysis_id) {
+                                navigate(`/history?id=${encodeURIComponent(matchingAnalysis.analysis_id)}`);
+                              } else {
+                                navigate('/history');
+                              }
+                            }}
+                            title={matchingAnalysis ? `View analysis ${matchingAnalysis.analysis_id} in history` : 'View audit history'}
+                          >
+                            History →
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => navigate(`/analytics?repo=${encodeURIComponent(id)}`)}
+                            title="Inspect repository risk analytics and trends"
+                          >
+                            Analytics
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => {
+                              if (matchingAnalysis?.analysis_id) {
+                                navigate(`/reviews?analysis_id=${encodeURIComponent(matchingAnalysis.analysis_id)}`);
+                              } else {
+                                navigate('/reviews');
+                              }
+                            }}
+                            title="Review security findings and manage suppressions"
+                          >
+                            Review
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => navigate(`/pull-requests?repo=${encodeURIComponent(id)}`)}
+                            title="View Pull Requests for this repository"
+                          >
+                            PRs
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );

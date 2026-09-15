@@ -20,7 +20,7 @@ export default function PageHeader({
   return (
     <div className={`card cs-page-header ${className}`} style={{ padding: '20px', marginBottom: '20px', ...style }}>
       {/* Optional Breadcrumb Navigation */}
-      <Breadcrumbs items={breadcrumbs} />
+      {breadcrumbs && <Breadcrumbs items={breadcrumbs} />}
 
       <div
         style={{
@@ -31,17 +31,17 @@ export default function PageHeader({
           gap: '12px',
         }}
       >
-        <div style={{ flex: '1 1 320px' }}>
+        <div style={{ flex: '1 1 280px', minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '4px' }}>
             {icon && <span style={{ display: 'inline-flex', alignItems: 'center' }}>{icon}</span>}
-            <h1 style={{ fontSize: '20px', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
+            <h1 style={{ fontSize: '20px', fontWeight: 700, color: 'var(--text-primary)', margin: 0, wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
               {title}
             </h1>
             {badge && <span style={{ display: 'inline-flex' }}>{badge}</span>}
           </div>
 
           {description && (
-            <p style={{ fontSize: '13px', color: 'var(--text-muted)', margin: 0, lineHeight: 1.45 }}>
+            <p style={{ fontSize: '13px', color: 'var(--text-muted)', margin: 0, lineHeight: 1.45, wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
               {description}
             </p>
           )}

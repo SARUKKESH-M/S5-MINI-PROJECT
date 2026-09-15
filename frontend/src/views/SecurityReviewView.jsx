@@ -159,6 +159,19 @@ export default function SecurityReviewView() {
     }
   }, [searchParams]);
 
+  // Keyboard escape listener for suppress & revoke modals
+  useEffect(() => {
+    if (!suppressingFinding && !revokingFinding) return;
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape' && !actionSubmitting) {
+        if (suppressingFinding) handleCloseSuppressModal();
+        if (revokingFinding) handleCloseRevokeModal();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [suppressingFinding, revokingFinding, actionSubmitting]);
+
   // Switch analysis
   const handleSelectAnalysis = (newId) => {
     if (!newId || newId === selectedAnalysisId) return;

@@ -290,7 +290,7 @@ export default function AnalyzeView() {
       </div>
 
       {/* Main Workspace Layout */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(350px, 1.2fr) minmax(350px, 1fr)', gap: '20px' }}>
+      <div className="cs-analyze-grid-layout">
         {/* Left Column: Form / Editor */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
           {analysisMode === 'repository' ? (
@@ -349,7 +349,7 @@ export default function AnalyzeView() {
               </div>
 
               {/* Branch & Subpath Row */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+              <div className="cs-form-2col-grid">
                 <div className="cs-form-group">
                   <label htmlFor="branch-input" className="cs-form-label">
                     Git Branch
@@ -579,19 +579,7 @@ export default function AnalyzeView() {
               </div>
 
               {/* Severity Metrics Breakdown */}
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(5, 1fr)',
-                  gap: '8px',
-                  padding: '12px',
-                  backgroundColor: 'var(--bg-void)',
-                  borderRadius: 'var(--radius-sm)',
-                  border: '1px solid var(--border-subtle)',
-                  textAlign: 'center',
-                  marginBottom: '16px',
-                }}
-              >
+              <div className="cs-severity-breakdown-bar">
                 <div>
                   <div style={{ fontSize: '10px', color: 'var(--sev-critical)', fontFamily: 'var(--font-mono)' }}>CRIT</div>
                   <strong style={{ fontSize: '15px', color: 'var(--sev-critical)' }}>{summary.critical_count ?? 0}</strong>

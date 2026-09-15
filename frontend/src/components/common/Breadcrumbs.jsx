@@ -83,6 +83,8 @@ export default function Breadcrumbs({ items, className = '' }) {
                   style={{
                     color: isLast ? 'var(--text-primary)' : 'var(--text-muted)',
                     fontWeight: isLast ? 600 : 400,
+                    wordBreak: 'break-word',
+                    overflowWrap: 'anywhere',
                   }}
                 >
                   {item.label}
@@ -94,6 +96,8 @@ export default function Breadcrumbs({ items, className = '' }) {
                     color: 'var(--text-muted)',
                     textDecoration: 'none',
                     transition: 'color 0.15s ease',
+                    wordBreak: 'break-word',
+                    overflowWrap: 'anywhere',
                   }}
                   onMouseEnter={(e) => (e.currentTarget.style.color = '#6366F1')}
                   onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-muted)')}
