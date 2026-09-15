@@ -363,10 +363,35 @@ export default function FindingPreviewModal({
                 className="btn btn-secondary btn-sm"
                 onClick={() => {
                   onClose?.();
-                  navigate('/history');
+                  navigate('/history', { state: { analysisId: finding.analysis_id } });
                 }}
               >
                 Audit in History
+              </button>
+            )}
+            {finding.repository && !location.pathname.startsWith('/repositories') && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => {
+                  onClose?.();
+                  navigate('/repositories', { state: { repo: finding.repository } });
+                }}
+              >
+                Repository →
+              </button>
+            )}
+            {finding.is_false_positive && !location.pathname.startsWith('/false-positives') && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => {
+                  onClose?.();
+                  navigate('/false-positives');
+                }}
+                style={{ color: '#4338CA', borderColor: '#C7D2FE' }}
+              >
+                False Positives →
               </button>
             )}
             <button

@@ -10,8 +10,11 @@ const AnalyzeView = lazy(() => import('../views/AnalyzeView'));
 const RepositoryView = lazy(() => import('../views/RepositoryView'));
 const HistoryView = lazy(() => import('../views/HistoryView'));
 const PullRequestsView = lazy(() => import('../views/PullRequestsView'));
+const VulnerabilitiesView = lazy(() => import('../views/VulnerabilitiesView'));
+const DevelopersView = lazy(() => import('../views/DevelopersView'));
 const SecurityReviewView = lazy(() => import('../views/SecurityReviewView'));
 const AnalyticsView = lazy(() => import('../views/AnalyticsView'));
+const FalsePositivesView = lazy(() => import('../views/FalsePositivesView'));
 const SystemView = lazy(() => import('../views/SystemView'));
 const ToolsView = lazy(() => import('../views/ToolsView'));
 const SettingsView = lazy(() => import('../views/SettingsView'));
@@ -92,10 +95,26 @@ export default function AppRoutes() {
         }
       />
       <Route
+        path="/vulnerabilities"
+        element={
+          <PageLayout>
+            <VulnerabilitiesView />
+          </PageLayout>
+        }
+      />
+      <Route
         path="/reviews"
         element={
           <PageLayout>
             <SecurityReviewView />
+          </PageLayout>
+        }
+      />
+      <Route
+        path="/developers"
+        element={
+          <PageLayout>
+            <DevelopersView />
           </PageLayout>
         }
       />
@@ -106,6 +125,14 @@ export default function AppRoutes() {
         element={
           <PageLayout>
             <AnalyticsView />
+          </PageLayout>
+        }
+      />
+      <Route
+        path="/false-positives"
+        element={
+          <PageLayout>
+            <FalsePositivesView />
           </PageLayout>
         }
       />
