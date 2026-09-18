@@ -22,9 +22,13 @@ from backend.analysis.storage.models import (
     DEFAULT_TIME_WINDOW,
     VALID_REASON_CODES,
     VALID_TIME_WINDOWS,
+    UserRecord,
+    UserRole,
+    UserStatus,
     create_analysis_record,
     create_suppression_record,
     get_utc_now_iso,
+    normalize_email,
     parse_time_window,
     sanitize_finding_record,
     validate_reason_payload,
@@ -336,13 +340,40 @@ class AnalysisStore:
                         expires_at TEXT NOT NULL
                     );
 
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id TEXT PRIMARY KEY,
+                        google_sub TEXT UNIQUE,
+                        email TEXT NOT NULL UNIQUE,
+                        full_name TEXT,
+                        profile_picture TEXT,
+                        role TEXT NOT NULL DEFAULT 'USER' CHECK (role IN ('ADMIN', 'USER')),
+                        status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'DISABLED')),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        last_login TEXT,
+                        created_by TEXT
+                    );
+
                     CREATE INDEX IF NOT EXISTS idx_findings_analysis_id ON findings(analysis_id);
                     CREATE INDEX IF NOT EXISTS idx_analyses_created_at ON analyses(created_at DESC);
                     CREATE INDEX IF NOT EXISTS idx_fp_repo_fingerprint ON false_positives(repository_id, finding_fingerprint);
                     CREATE INDEX IF NOT EXISTS idx_fp_analysis_finding ON false_positives(analysis_id, finding_id);
                     CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_expires_at ON webhook_deliveries(expires_at);
                     CREATE INDEX IF NOT EXISTS idx_commit_reservations_lookup ON pr_commit_reservations(owner, repository, pr_number, head_sha);
-                    CREATE INDEX IF NOT EXISTS idx_commit_reservations_expires ON pr_commit_reservations(expires_at);
+                    CREATE TABLE IF NOT EXISTS user_sessions (
+                        session_id TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        revoked_at TEXT,
+                        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                    );
+
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub) WHERE google_sub IS NOT NULL;
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
+                    CREATE INDEX IF NOT EXISTS idx_users_status_role ON users(status, role);
+                    CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON user_sessions(user_id);
+                    CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON user_sessions(expires_at);
                 """)
 
                 # Additive Phase 31 schema migration for false_positives
@@ -392,6 +423,35 @@ class AnalysisStore:
                 # Additive Phase 33C index for exact PR commit lookup
                 conn.executescript("""
                     CREATE INDEX IF NOT EXISTS idx_analyses_pr_commit ON analyses(owner, repository, pr_number, head_sha);
+                """)
+
+                # Additive Phase A3 schema migration for users
+                users_info = conn.execute("PRAGMA table_info(users);").fetchall()
+                users_cols = {row["name"] for row in users_info}
+
+                if "google_sub" not in users_cols:
+                    conn.execute("ALTER TABLE users ADD COLUMN google_sub TEXT DEFAULT NULL;")
+                if "full_name" not in users_cols:
+                    conn.execute("ALTER TABLE users ADD COLUMN full_name TEXT DEFAULT NULL;")
+                if "profile_picture" not in users_cols:
+                    conn.execute("ALTER TABLE users ADD COLUMN profile_picture TEXT DEFAULT NULL;")
+                if "role" not in users_cols:
+                    conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'USER';")
+                if "status" not in users_cols:
+                    conn.execute("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE';")
+                if "created_at" not in users_cols:
+                    conn.execute("ALTER TABLE users ADD COLUMN created_at TEXT NOT NULL DEFAULT '';")
+                if "updated_at" not in users_cols:
+                    conn.execute("ALTER TABLE users ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';")
+                if "last_login" not in users_cols:
+                    conn.execute("ALTER TABLE users ADD COLUMN last_login TEXT DEFAULT NULL;")
+                if "created_by" not in users_cols:
+                    conn.execute("ALTER TABLE users ADD COLUMN created_by TEXT DEFAULT NULL;")
+
+                conn.executescript("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub) WHERE google_sub IS NOT NULL;
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
+                    CREATE INDEX IF NOT EXISTS idx_users_status_role ON users(status, role);
                 """)
 
             if not is_memory and os.path.exists(norm_path):
@@ -1990,5 +2050,643 @@ class AnalysisStore:
                 (now_str, max(1, limit))
             )
             return cursor.rowcount
+
+    # ========================================================================
+    # Phase A3: User & Access-Control Storage Methods
+    # ========================================================================
+
+    @staticmethod
+    def _row_to_user(row: Optional[sqlite3.Row]) -> Optional[UserRecord]:
+        """Convert a database row to an immutable UserRecord dataclass instance."""
+        if not row:
+            return None
+        return UserRecord(
+            user_id=str(row["user_id"]),
+            google_sub=str(row["google_sub"]) if row["google_sub"] is not None else None,
+            email=str(row["email"]),
+            full_name=str(row["full_name"]) if row["full_name"] is not None else None,
+            profile_picture=str(row["profile_picture"]) if row["profile_picture"] is not None else None,
+            role=str(row["role"]),
+            status=str(row["status"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            last_login=str(row["last_login"]) if row["last_login"] is not None else None,
+            created_by=str(row["created_by"]) if row["created_by"] is not None else None,
+        )
+
+    def get_user_by_id(self, user_id: str) -> Optional[UserRecord]:
+        """Retrieve user record by internal user_id. Returns UserRecord or None."""
+        if not user_id or not isinstance(user_id, str):
+            return None
+        clean_uid = user_id.strip()
+        if not clean_uid:
+            return None
+
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE user_id = ?;",
+                (clean_uid,)
+            ).fetchone()
+            return self._row_to_user(row)
+
+    def get_user_by_email(self, email: str) -> Optional[UserRecord]:
+        """Retrieve user record by normalized lowercase email address."""
+        if not email or not isinstance(email, str):
+            return None
+        try:
+            clean_email = normalize_email(email)
+        except ValueError:
+            return None
+
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE email = ?;",
+                (clean_email,)
+            ).fetchone()
+            return self._row_to_user(row)
+
+    def get_user_by_google_sub(self, google_sub: str) -> Optional[UserRecord]:
+        """Retrieve user record by Google OpenID Connect subject identifier (sub)."""
+        if not google_sub or not isinstance(google_sub, str):
+            return None
+        clean_sub = google_sub.strip()
+        if not clean_sub:
+            return None
+
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE google_sub = ?;",
+                (clean_sub,)
+            ).fetchone()
+            return self._row_to_user(row)
+
+    def insert_user(self, user: UserRecord) -> UserRecord:
+        """Insert a new user record into storage.
+        
+        Validates internal constraints and enforces unique constraints on email and google_sub.
+        Raises:
+            TypeError: If user is not an instance of UserRecord.
+            ValueError: If user parameters are invalid or violate uniqueness.
+        """
+        if not isinstance(user, UserRecord):
+            raise TypeError("user must be an instance of UserRecord")
+        if not user.user_id or not user.user_id.strip():
+            raise ValueError("user_id cannot be empty")
+
+        clean_email = normalize_email(user.email)
+        clean_role = str(user.role).strip().upper()
+        if clean_role not in (UserRole.ADMIN.value, UserRole.USER.value):
+            raise ValueError(f"Invalid role '{user.role}'. Must be ADMIN or USER.")
+
+        clean_status = str(user.status).strip().upper()
+        if clean_status not in (UserStatus.ACTIVE.value, UserStatus.DISABLED.value):
+            raise ValueError(f"Invalid status '{user.status}'. Must be ACTIVE or DISABLED.")
+
+        clean_sub = str(user.google_sub).strip() if user.google_sub else None
+        now = get_utc_now_iso()
+        created_at = str(user.created_at) if user.created_at else now
+        updated_at = str(user.updated_at) if user.updated_at else now
+
+        with self._get_connection() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO users (
+                        user_id, google_sub, email, full_name, profile_picture,
+                        role, status, created_at, updated_at, last_login, created_by
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        user.user_id.strip(),
+                        clean_sub,
+                        clean_email,
+                        user.full_name.strip() if user.full_name else None,
+                        user.profile_picture.strip() if user.profile_picture else None,
+                        clean_role,
+                        clean_status,
+                        created_at,
+                        updated_at,
+                        user.last_login,
+                        user.created_by.strip() if user.created_by else None,
+                    )
+                )
+            except sqlite3.IntegrityError as err:
+                err_msg = str(err).lower()
+                if "users.email" in err_msg or ("unique" in err_msg and "email" in err_msg):
+                    raise ValueError(f"User with email '{clean_email}' already exists.") from err
+                if "users.google_sub" in err_msg or ("unique" in err_msg and "google_sub" in err_msg):
+                    raise ValueError(f"User with Google identity '{clean_sub}' already exists.") from err
+                if "primary" in err_msg or "user_id" in err_msg:
+                    raise ValueError(f"User with user_id '{user.user_id.strip()}' already exists.") from err
+                raise ValueError(f"Integrity violation creating user: {err}") from err
+
+        return UserRecord(
+            user_id=user.user_id.strip(),
+            google_sub=clean_sub,
+            email=clean_email,
+            full_name=user.full_name.strip() if user.full_name else None,
+            profile_picture=user.profile_picture.strip() if user.profile_picture else None,
+            role=clean_role,
+            status=clean_status,
+            created_at=created_at,
+            updated_at=updated_at,
+            last_login=user.last_login,
+            created_by=user.created_by.strip() if user.created_by else None,
+        )
+
+    def create_authorized_user(
+        self,
+        email: str,
+        role: str = UserRole.USER.value,
+        full_name: Optional[str] = None,
+        created_by: Optional[str] = None,
+    ) -> UserRecord:
+        """Create and pre-authorize a new user account with google_sub=None.
+        
+        Account defaults to status='ACTIVE' and role='USER' (unless explicitly specified).
+        Raises:
+            ValueError: If email is invalid, duplicate, or role is invalid.
+        """
+        clean_email = normalize_email(email)
+        clean_role = str(role).strip().upper()
+        if clean_role not in (UserRole.ADMIN.value, UserRole.USER.value):
+            raise ValueError(f"Invalid role '{role}'. Must be ADMIN or USER.")
+
+        existing = self.get_user_by_email(clean_email)
+        if existing:
+            raise ValueError(f"User with email '{clean_email}' already exists.")
+
+        user_id = f"usr_{uuid.uuid4().hex[:16]}"
+        now = get_utc_now_iso()
+        record = UserRecord(
+            user_id=user_id,
+            google_sub=None,
+            email=clean_email,
+            full_name=full_name.strip() if full_name else None,
+            profile_picture=None,
+            role=clean_role,
+            status=UserStatus.ACTIVE.value,
+            created_at=now,
+            updated_at=now,
+            last_login=None,
+            created_by=created_by.strip() if created_by else None,
+        )
+        return self.insert_user(record)
+
+    def bind_google_identity(
+        self,
+        user_id: str,
+        google_sub: str,
+        full_name: Optional[str] = None,
+        profile_picture: Optional[str] = None,
+    ) -> UserRecord:
+        """Bind verified Google OpenID Connect identity claims to an authorized user account.
+        
+        Guarantees:
+        1. google_sub cannot be empty.
+        2. Prevent binding the same google_sub to two distinct users.
+        3. Prevent silently mutating an existing user's bound google_sub to a different identity.
+        4. Preserves account role, status, created_at, and created_by.
+        5. Updates updated_at and profile metadata if provided.
+        """
+        if not user_id or not isinstance(user_id, str):
+            raise ValueError("user_id cannot be empty.")
+        if not google_sub or not isinstance(google_sub, str):
+            raise ValueError("google_sub cannot be empty.")
+
+        clean_uid = user_id.strip()
+        clean_sub = google_sub.strip()
+        if not clean_uid:
+            raise ValueError("user_id cannot be empty.")
+        if not clean_sub:
+            raise ValueError("google_sub cannot be empty.")
+
+        with self._get_connection() as conn:
+            # Check if another user already holds this google_sub
+            conflict_row = conn.execute(
+                "SELECT user_id FROM users WHERE google_sub = ? AND user_id != ?;",
+                (clean_sub, clean_uid)
+            ).fetchone()
+            if conflict_row:
+                raise ValueError(f"Google identity '{clean_sub}' is already linked to another account.")
+
+            target_row = conn.execute(
+                "SELECT * FROM users WHERE user_id = ?;",
+                (clean_uid,)
+            ).fetchone()
+            if not target_row:
+                raise ValueError(f"User '{clean_uid}' not found.")
+
+            target_user = self._row_to_user(target_row)
+            if target_user.google_sub and target_user.google_sub != clean_sub:
+                raise ValueError(f"User '{clean_uid}' is already bound to a different Google identity.")
+
+            now = get_utc_now_iso()
+            new_full_name = full_name.strip() if full_name and full_name.strip() else target_user.full_name
+            new_picture = profile_picture.strip() if profile_picture and profile_picture.strip() else target_user.profile_picture
+
+            conn.execute(
+                """
+                UPDATE users
+                SET google_sub = ?,
+                    full_name = ?,
+                    profile_picture = ?,
+                    updated_at = ?
+                WHERE user_id = ?;
+                """,
+                (clean_sub, new_full_name, new_picture, now, clean_uid)
+            )
+
+            updated_row = conn.execute(
+                "SELECT * FROM users WHERE user_id = ?;", (clean_uid,)
+            ).fetchone()
+            return self._row_to_user(updated_row)
+
+    def record_successful_login(
+        self,
+        user_id: str,
+        login_time_iso: Optional[str] = None,
+    ) -> Optional[UserRecord]:
+        """Record successful authentication timestamp.
+        
+        Updates last_login and updated_at.
+        Preserves role, status, created_at, created_by.
+        """
+        if not user_id or not isinstance(user_id, str):
+            return None
+        clean_uid = user_id.strip()
+        if not clean_uid:
+            return None
+
+        now = login_time_iso or get_utc_now_iso()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE users
+                SET last_login = ?,
+                    updated_at = ?
+                WHERE user_id = ?;
+                """,
+                (now, now, clean_uid)
+            )
+            if cursor.rowcount == 0:
+                return None
+
+            row = conn.execute("SELECT * FROM users WHERE user_id = ?;", (clean_uid,)).fetchone()
+            return self._row_to_user(row)
+
+    def update_user_role(self, user_id: str, role: str) -> Optional[UserRecord]:
+        """Atomically update a user's role (ADMIN or USER)."""
+        clean_role = str(role).strip().upper()
+        if clean_role not in (UserRole.ADMIN.value, UserRole.USER.value):
+            raise ValueError(f"Invalid role '{role}'. Must be ADMIN or USER.")
+        if not user_id or not isinstance(user_id, str):
+            return None
+        clean_uid = user_id.strip()
+        if not clean_uid:
+            return None
+
+        now = get_utc_now_iso()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE users
+                SET role = ?,
+                    updated_at = ?
+                WHERE user_id = ?;
+                """,
+                (clean_role, now, clean_uid)
+            )
+            if cursor.rowcount == 0:
+                return None
+
+            row = conn.execute("SELECT * FROM users WHERE user_id = ?;", (clean_uid,)).fetchone()
+            return self._row_to_user(row)
+
+    def update_user_status(self, user_id: str, status: str) -> Optional[UserRecord]:
+        """Atomically update a user's operational status (ACTIVE or DISABLED)."""
+        clean_status = str(status).strip().upper()
+        if clean_status not in (UserStatus.ACTIVE.value, UserStatus.DISABLED.value):
+            raise ValueError(f"Invalid status '{status}'. Must be ACTIVE or DISABLED.")
+        if not user_id or not isinstance(user_id, str):
+            return None
+        clean_uid = user_id.strip()
+        if not clean_uid:
+            return None
+
+        now = get_utc_now_iso()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE users
+                SET status = ?,
+                    updated_at = ?
+                WHERE user_id = ?;
+                """,
+                (clean_status, now, clean_uid)
+            )
+            if cursor.rowcount == 0:
+                return None
+
+            row = conn.execute("SELECT * FROM users WHERE user_id = ?;", (clean_uid,)).fetchone()
+            return self._row_to_user(row)
+
+    def update_user_role_and_status(
+        self,
+        user_id: str,
+        role: str,
+        status: str,
+    ) -> Optional[UserRecord]:
+        """Atomically update both role and status in a single database transaction."""
+        clean_role = str(role).strip().upper()
+        if clean_role not in (UserRole.ADMIN.value, UserRole.USER.value):
+            raise ValueError(f"Invalid role '{role}'. Must be ADMIN or USER.")
+        clean_status = str(status).strip().upper()
+        if clean_status not in (UserStatus.ACTIVE.value, UserStatus.DISABLED.value):
+            raise ValueError(f"Invalid status '{status}'. Must be ACTIVE or DISABLED.")
+        if not user_id or not isinstance(user_id, str):
+            return None
+        clean_uid = user_id.strip()
+        if not clean_uid:
+            return None
+
+        now = get_utc_now_iso()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE users
+                SET role = ?,
+                    status = ?,
+                    updated_at = ?
+                WHERE user_id = ?;
+                """,
+                (clean_role, clean_status, now, clean_uid)
+            )
+            if cursor.rowcount == 0:
+                return None
+
+            row = conn.execute("SELECT * FROM users WHERE user_id = ?;", (clean_uid,)).fetchone()
+            return self._row_to_user(row)
+
+    def list_users(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        role: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> List[UserRecord]:
+        """Retrieve paginated list of user records with deterministic ordering."""
+        safe_limit = max(1, min(limit, 200))
+        safe_offset = max(0, offset)
+
+        query = "SELECT * FROM users"
+        params: List[Any] = []
+        conditions: List[str] = []
+
+        if role:
+            clean_role = str(role).strip().upper()
+            if clean_role in (UserRole.ADMIN.value, UserRole.USER.value):
+                conditions.append("role = ?")
+                params.append(clean_role)
+
+        if status:
+            clean_status = str(status).strip().upper()
+            if clean_status in (UserStatus.ACTIVE.value, UserStatus.DISABLED.value):
+                conditions.append("status = ?")
+                params.append(clean_status)
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        query += " ORDER BY created_at DESC, user_id ASC LIMIT ? OFFSET ?;"
+        params.extend([safe_limit, safe_offset])
+
+        with self._get_connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+            return [self._row_to_user(r) for r in rows if r]
+
+    def count_users(
+        self,
+        role: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> int:
+        """Count total user records matching optional role and status filters."""
+        query = "SELECT COUNT(*) as cnt FROM users"
+        params: List[Any] = []
+        conditions: List[str] = []
+
+        if role:
+            clean_role = str(role).strip().upper()
+            if clean_role in (UserRole.ADMIN.value, UserRole.USER.value):
+                conditions.append("role = ?")
+                params.append(clean_role)
+
+        if status:
+            clean_status = str(status).strip().upper()
+            if clean_status in (UserStatus.ACTIVE.value, UserStatus.DISABLED.value):
+                conditions.append("status = ?")
+                params.append(clean_status)
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        with self._get_connection() as conn:
+            row = conn.execute(query, tuple(params)).fetchone()
+            return int(row["cnt"]) if row else 0
+
+    def seed_initial_admin(
+        self,
+        admin_email: Optional[str],
+        admin_name: Optional[str] = "Root Administrator",
+    ) -> Optional[UserRecord]:
+        """Idempotently seed or reaffirm the initial root administrator account.
+        
+        Guarantees:
+        1. If admin_email is None or empty, safely returns None.
+        2. If user exists: reaffirms role='ADMIN' and status='ACTIVE' without wiping
+           bound google_sub, profile picture, or login timestamp.
+        3. If user does not exist: creates pre-authorized ADMIN record with google_sub=None
+           and created_by='SYSTEM_SEED'.
+        """
+        if not admin_email or not str(admin_email).strip():
+            return None
+
+        try:
+            normalized_email = normalize_email(admin_email)
+        except ValueError:
+            return None
+
+        existing_user = self.get_user_by_email(normalized_email)
+        if existing_user:
+            if existing_user.role != UserRole.ADMIN.value or existing_user.status != UserStatus.ACTIVE.value:
+                return self.update_user_role_and_status(
+                    user_id=existing_user.user_id,
+                    role=UserRole.ADMIN.value,
+                    status=UserStatus.ACTIVE.value,
+                )
+            return existing_user
+
+        user_id = f"usr_root_{uuid.uuid4().hex[:12]}"
+        now = get_utc_now_iso()
+        root_admin = UserRecord(
+            user_id=user_id,
+            google_sub=None,
+            email=normalized_email,
+            full_name=admin_name.strip() if admin_name and admin_name.strip() else "Root Administrator",
+            profile_picture=None,
+            role=UserRole.ADMIN.value,
+            status=UserStatus.ACTIVE.value,
+            created_at=now,
+            updated_at=now,
+            last_login=None,
+            created_by="SYSTEM_SEED",
+        )
+        return self.insert_user(root_admin)
+
+    # ========================================================================
+    # Phase A4: Session Storage Methods
+    # ========================================================================
+
+    def create_session(
+        self,
+        user_id: str,
+        expires_seconds: int = 86400 * 7,
+    ) -> str:
+        """Create a new authenticated user session and store in SQLite.
+        
+        Returns generated session_id.
+        """
+        if not user_id or not str(user_id).strip():
+            raise ValueError("user_id cannot be empty to create session.")
+        clean_uid = str(user_id).strip()
+
+        from datetime import datetime, timezone, timedelta
+        now_dt = datetime.now(timezone.utc)
+        expires_dt = now_dt + timedelta(seconds=max(60, expires_seconds))
+
+        import secrets
+        session_id = f"sess_{secrets.token_hex(32)}"
+        created_at = now_dt.isoformat()
+        expires_at = expires_dt.isoformat()
+
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_sessions (session_id, user_id, created_at, expires_at, revoked_at)
+                VALUES (?, ?, ?, ?, NULL);
+                """,
+                (session_id, clean_uid, created_at, expires_at)
+            )
+
+        return session_id
+
+    def get_session_user(self, session_id: str) -> Optional[UserRecord]:
+        """Retrieve the UserRecord associated with an active, unexpired, unrevoked session.
+        
+        Returns UserRecord or None if session is missing, revoked, or expired.
+        """
+        if not session_id or not str(session_id).strip():
+            return None
+        clean_sid = str(session_id).strip()
+
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT u.* FROM users u
+                JOIN user_sessions s ON u.user_id = s.user_id
+                WHERE s.session_id = ?
+                  AND s.revoked_at IS NULL
+                  AND s.expires_at > ?;
+                """,
+                (clean_sid, now_iso)
+            ).fetchone()
+            return self._row_to_user(row)
+
+    def revoke_session(self, session_id: str) -> bool:
+        """Revoke an active session. Returns True if a session was revoked."""
+        if not session_id or not str(session_id).strip():
+            return False
+        clean_sid = str(session_id).strip()
+
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE user_sessions
+                SET revoked_at = ?
+                WHERE session_id = ? AND revoked_at IS NULL;
+                """,
+                (now_iso, clean_sid)
+            )
+            return cursor.rowcount > 0
+
+    def cleanup_expired_sessions(self, limit: int = 500) -> int:
+        """Bounded deletion of expired or revoked user sessions."""
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM user_sessions
+                WHERE rowid IN (
+                    SELECT rowid FROM user_sessions
+                    WHERE expires_at <= ? OR revoked_at IS NOT NULL
+                    LIMIT ?
+                );
+                """,
+                (now_iso, max(1, limit))
+            )
+            return cursor.rowcount
+
+    def revoke_user_sessions(self, user_id: str) -> int:
+        """Revoke all active sessions for a specific user ID.
+        
+        Returns count of sessions revoked.
+        """
+        if not user_id or not str(user_id).strip():
+            return 0
+        clean_uid = str(user_id).strip()
+
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE user_sessions
+                SET revoked_at = ?
+                WHERE user_id = ? AND revoked_at IS NULL;
+                """,
+                (now_iso, clean_uid)
+            )
+            return cursor.rowcount
+
+    def delete_user(self, user_id: str) -> bool:
+        """Delete a user record by user_id. Cascades deletion to user_sessions via SQLite foreign keys.
+        
+        Returns True if a user record was deleted.
+        """
+        if not user_id or not str(user_id).strip():
+            return False
+        clean_uid = str(user_id).strip()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM users WHERE user_id = ?;",
+                (clean_uid,)
+            )
+            return cursor.rowcount > 0
+
+
 
 

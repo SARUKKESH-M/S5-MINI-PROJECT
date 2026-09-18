@@ -40,9 +40,26 @@ class Settings(BaseSettings):
     # Vector Store & RAG Storage Path
     CHROMA_DB_PATH: str = "./data/chroma"
 
+    # Google OAuth / OpenID Connect Settings
+    GOOGLE_CLIENT_ID: Optional[str] = None
+    GOOGLE_CLIENT_SECRET: Optional[str] = None
+    GOOGLE_REDIRECT_URI: Optional[str] = None
+
+    # Backend Session & Cookie Hardening
+    SESSION_SECRET_KEY: str = "codesentinel_session_secret_key_change_in_production"
+    SESSION_COOKIE_NAME: str = "codesentinel_session"
+    SESSION_EXPIRE_SECONDS: int = 86400 * 7  # 7 days default
+    SESSION_COOKIE_SECURE: Optional[bool] = None  # None = auto (True if APP_ENV==production)
+    SESSION_COOKIE_SAMESITE: str = "lax"
+
+    # Root Administrator Pre-Provisioning
+    ADMIN_INITIAL_EMAIL: Optional[str] = None
+    ADMIN_INITIAL_NAME: str = "Root Administrator"
+
     # Security Hardening Baseline Settings
+    AUTH_ENFORCED: bool = True
     MAX_REQUEST_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB maximum request payload size
-    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000,https://codesentinel-s5.vercel.app"
     ENABLE_SECURITY_HEADERS: bool = True
 
     model_config = SettingsConfigDict(
@@ -64,6 +81,8 @@ class Settings(BaseSettings):
             "DATABASE_URL",
             "REDIS_URL",
             "SLACK_WEBHOOK_URL",
+            "GOOGLE_CLIENT_SECRET",
+            "SESSION_SECRET_KEY",
         }
         summary: Dict[str, Optional[object]] = {}
         for key in type(self).model_fields.keys():

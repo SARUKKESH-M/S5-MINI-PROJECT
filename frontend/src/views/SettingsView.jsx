@@ -15,6 +15,9 @@ import {
   ReviewsIcon,
 } from '../components/dashboard/Icons';
 
+import { useAuth } from '../context/AuthContext';
+import UserManagementPanel from '../components/admin/UserManagementPanel';
+
 /**
  * Sanitize error messages to avoid displaying local filesystem paths,
  * database paths, environment variables, or tokens.
@@ -34,10 +37,12 @@ const SETTINGS_TABS = [
   { id: 'capabilities', label: 'Analysis Capabilities' },
   { id: 'preferences', label: 'UI Preferences' },
   { id: 'diagnostics', label: 'Platform Readiness' },
+  { id: 'access', label: 'Access Management' },
 ];
 
 export default function SettingsView() {
   const navigate = useNavigate();
+  const { user: currentUser } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Active Tab from URL search params or default
@@ -672,6 +677,30 @@ export default function SettingsView() {
                 </button>
               </div>
             </div>
+          )}
+
+          {/* TAB 6: Access Management (Admin Only) */}
+          {activeTab === 'access' && (
+            currentUser?.role === 'ADMIN' ? (
+              <UserManagementPanel />
+            ) : (
+              <div className="card" style={{ padding: '40px 24px', textAlign: 'center' }}>
+                <div style={{ fontSize: '32px', marginBottom: '12px' }}>🔒</div>
+                <h2 style={{ fontSize: '18px', fontWeight: 700, color: 'var(--text-primary)', margin: '0 0 8px' }}>
+                  Administrative Privileges Required
+                </h2>
+                <p style={{ fontSize: '13px', color: 'var(--text-muted)', maxWidth: '460px', margin: '0 auto 16px', lineHeight: 1.5 }}>
+                  User access management and Google pre-authorization require an active administrator account. Your current account ({currentUser?.email || 'authenticated user'}) has role <strong>{currentUser?.role || 'USER'}</strong>.
+                </p>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setTab('application')}
+                >
+                  ← Return to Application Settings
+                </button>
+              </div>
+            )
           )}
         </div>
       )}

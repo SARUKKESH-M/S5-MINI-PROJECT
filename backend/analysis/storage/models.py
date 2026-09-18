@@ -4,8 +4,11 @@ Ensures persistent records strictly adhere to Step 6H finding schema and schema_
 Explicitly excludes raw source code, raw source fields, and raw secrets.
 """
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
+from pydantic import BaseModel, Field, field_validator
 
 ANALYSIS_SCHEMA_VERSION = "1.0"
 
@@ -252,3 +255,153 @@ DEFAULT_DELIVERY_TTL_SECONDS = 86400  # 24 hours
 # Phase 33C: Commit-Level Analysis Idempotency & PR Persistence Contracts
 # ============================================================================
 DEFAULT_COMMIT_RESERVATION_TTL_SECONDS = 300  # 5 minutes bounded recovery
+
+
+# ============================================================================
+# Phase A3: User & Access-Control Storage Models
+# ============================================================================
+
+class UserRole(str, Enum):
+    ADMIN = "ADMIN"
+    USER = "USER"
+
+
+class UserStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
+
+
+def normalize_email(email: Optional[str]) -> str:
+    """Normalize email address to lowercase and trimmed string.
+    
+    Raises:
+        ValueError: If email is empty, not a string, or contains invalid characters.
+    """
+    if not email or not isinstance(email, str):
+        raise ValueError("Email address must be a non-empty string.")
+    cleaned = email.strip().lower()
+    if not cleaned or "@" not in cleaned or cleaned.startswith("@") or cleaned.endswith("@"):
+        raise ValueError(f"Invalid email address format: '{email}'")
+    return cleaned
+
+
+@dataclass(frozen=True)
+class UserRecord:
+    """Internal immutable storage representation of a CodeSentinel user."""
+    user_id: str
+    google_sub: Optional[str]
+    email: str
+    full_name: Optional[str]
+    profile_picture: Optional[str]
+    role: str
+    status: str
+    created_at: str
+    updated_at: str
+    last_login: Optional[str] = None
+    created_by: Optional[str] = None
+
+    def is_active(self) -> bool:
+        """Return True if account is in ACTIVE status."""
+        return self.status == UserStatus.ACTIVE.value
+
+    def is_admin(self) -> bool:
+        """Return True if account has ADMIN role."""
+        return self.role == UserRole.ADMIN.value
+
+
+# ============================================================================
+# Phase A3 & A4: Pydantic Validation & API Schemas
+# ============================================================================
+
+class GoogleIdentityPayload(BaseModel):
+    """Verified identity claims received from Google OpenID Connect."""
+    sub: str = Field(..., description="Google unique subject identifier")
+    email: str = Field(..., description="User primary Google email")
+    name: Optional[str] = Field(None, description="User full name from Google profile")
+    picture: Optional[str] = Field(None, description="Profile picture avatar URL")
+
+    @field_validator("email")
+    @classmethod
+    def validate_and_normalize_email(cls, v: str) -> str:
+        return normalize_email(v)
+
+
+class UserPublicResponse(BaseModel):
+    """Public representation of an authenticated user for UI/session state."""
+    user_id: str
+    email: str
+    full_name: Optional[str] = None
+    profile_picture: Optional[str] = None
+    role: str
+    status: str
+    created_at: str
+    last_login: Optional[str] = None
+
+
+class UserPreAuthorizeRequest(BaseModel):
+    """Payload for Admin pre-authorizing an email address."""
+    email: str = Field(..., description="Corporate or personal Google email to authorize")
+    role: str = Field(default=UserRole.USER.value, description="Initial assigned role")
+    full_name: Optional[str] = Field(None, description="Optional anticipated display name")
+
+    @field_validator("email")
+    @classmethod
+    def validate_and_normalize_email(cls, v: str) -> str:
+        return normalize_email(v)
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v: str) -> str:
+        clean = str(v).strip().upper()
+        if clean not in (UserRole.ADMIN.value, UserRole.USER.value):
+            raise ValueError(f"Invalid role '{v}'. Must be ADMIN or USER.")
+        return clean
+
+
+class UserStatusUpdateRequest(BaseModel):
+    """Payload for activating or disabling an account."""
+    status: str = Field(..., description="New operational account status")
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        clean = str(v).strip().upper()
+        if clean not in (UserStatus.ACTIVE.value, UserStatus.DISABLED.value):
+            raise ValueError(f"Invalid status '{v}'. Must be ACTIVE or DISABLED.")
+        return clean
+
+
+class UserRoleUpdateRequest(BaseModel):
+    """Payload for promoting or demoting an account."""
+    role: str = Field(..., description="New assigned role")
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v: str) -> str:
+        clean = str(v).strip().upper()
+        if clean not in (UserRole.ADMIN.value, UserRole.USER.value):
+            raise ValueError(f"Invalid role '{v}'. Must be ADMIN or USER.")
+        return clean
+
+
+class UserAdminDetailResponse(BaseModel):
+    """Detailed user view for Admin user management dashboard."""
+    user_id: str
+    google_sub: Optional[str] = None
+    email: str
+    full_name: Optional[str] = None
+    profile_picture: Optional[str] = None
+    role: str
+    status: str
+    created_at: str
+    updated_at: str
+    last_login: Optional[str] = None
+    created_by: Optional[str] = None
+
+
+class UserListResponse(BaseModel):
+    """Paginated user listing for Admin workspace."""
+    users: List[UserAdminDetailResponse]
+    total_count: int
+
+

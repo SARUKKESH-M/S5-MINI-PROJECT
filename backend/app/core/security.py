@@ -24,7 +24,7 @@ except ImportError:
 
 # Patterns for secret redaction in logs/errors
 TOKEN_LITERAL_REGEX = re.compile(
-    r"(ghp_[a-zA-Z0-9_]{16,255}|gho_[a-zA-Z0-9_]{16,255}|github_pat_[a-zA-Z0-9_]{16,255}|gsk_[a-zA-Z0-9_]{16,255}|bearer\s+[a-zA-Z0-9._\-]+|secret_[a-zA-Z0-9_]{4,})",
+    r"(ghp_[a-zA-Z0-9_]{16,255}|gho_[a-zA-Z0-9_]{16,255}|github_pat_[a-zA-Z0-9_]{16,255}|gsk_[a-zA-Z0-9_]{16,255}|bearer\s+[a-zA-Z0-9._\-]+|secret_[a-zA-Z0-9_]{4,}|sess_[a-fA-F0-9]{16,}|session_[a-zA-Z0-9_]{16,})",
     re.IGNORECASE
 )
 
@@ -66,6 +66,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none';"
         return response
 

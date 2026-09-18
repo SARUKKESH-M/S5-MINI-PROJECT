@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSidebar } from './SidebarContext';
+import { useAuth } from '../../context/AuthContext';
 import { SearchIcon, BellIcon, GitHubIcon, ChevronDownIcon } from './Icons';
 import { getAnalyses, getPlatformHealth } from '../../services/apiClient';
 
@@ -14,16 +15,32 @@ const WORKSPACE_TARGETS = [
   { id: 'history', title: 'Audit History', path: '/history', category: 'Workspaces', hint: 'Permanent chronological scan records' },
   { id: 'tools', title: 'Operational Tools', path: '/tools', category: 'Workspaces', hint: 'Subsystem release readiness & policy inspector' },
   { id: 'settings', title: 'Platform Settings', path: '/settings', category: 'Workspaces', hint: 'Server policies, engine specs & UI preferences' },
+  { id: 'access', title: 'Access Management', path: '/settings?tab=access', category: 'Admin', hint: 'Pre-authorize Google users & manage access' },
   { id: 'system', title: 'System Diagnostics', path: '/system', category: 'Workspaces', hint: 'Component health checks & readiness probes' },
 ];
 
 export default function TopHeader() {
   const navigate = useNavigate();
   const { toggleSidebar, isOpen: isSidebarOpen } = useSidebar();
+  const { user, logout } = useAuth();
   const searchInputRef = useRef(null);
   const searchContainerRef = useRef(null);
   const notifBtnRef = useRef(null);
   const profileBtnRef = useRef(null);
+
+  // Authenticated user display values
+  const userName = user?.full_name || 'CodeSentinel User';
+  const userEmail = user?.email || 'authenticated@codesentinel.dev';
+  const userRole = user?.role || 'USER';
+  const userAvatar = user?.profile_picture || null;
+  const userInitials = useMemo(() => {
+    if (!userName) return 'CS';
+    const parts = userName.trim().split(/\s+/);
+    if (parts.length >= 2) {
+      return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    }
+    return userName.slice(0, 2).toUpperCase();
+  }, [userName]);
 
   // Popover visibility states
   const [searchQuery, setSearchQuery] = useState('');
@@ -456,15 +473,24 @@ export default function TopHeader() {
             }}
             aria-expanded={showProfileMenu}
             aria-haspopup="menu"
-            aria-label="User Profile & Settings (Sharu Mani, Developer)"
+            aria-label={`User Profile & Settings (${userName}, ${userRole})`}
             title="User Profile & Settings"
           >
             <div className="cs-user-avatar" aria-hidden="true">
-              <span>SM</span>
+              {userAvatar ? (
+                <img
+                  src={userAvatar}
+                  alt={userName}
+                  style={{ width: '100%', height: '100%', borderRadius: 'inherit', objectFit: 'cover' }}
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <span>{userInitials}</span>
+              )}
             </div>
             <div className="cs-user-info">
-              <div className="cs-user-name">Sharu Mani</div>
-              <div className="cs-user-role">Developer</div>
+              <div className="cs-user-name">{userName}</div>
+              <div className="cs-user-role">{userRole}</div>
             </div>
             <ChevronDownIcon size={14} color="#64748B" />
           </button>
@@ -476,10 +502,27 @@ export default function TopHeader() {
               role="menu"
             >
               <div className="cs-dropdown-user-header">
-                <strong>Sharu Mani</strong>
-                <span style={{ fontSize: '11px', color: '#64748B' }}>admin@codesentinel.dev</span>
+                <strong>{userName}</strong>
+                <span style={{ fontSize: '11px', color: '#64748B' }}>{userEmail}</span>
+                <span style={{ fontSize: '10px', color: userRole === 'ADMIN' ? '#00f0ff' : '#94A3B8', fontWeight: 600, marginTop: '2px', textTransform: 'uppercase' }}>
+                  {userRole}
+                </span>
               </div>
               <div className="cs-dropdown-divider" />
+              {userRole === 'ADMIN' && (
+                <button
+                  type="button"
+                  className="cs-dropdown-item"
+                  style={{ color: '#00f0ff', fontWeight: 600 }}
+                  role="menuitem"
+                  onClick={() => {
+                    setShowProfileMenu(false);
+                    navigate('/settings?tab=access');
+                  }}
+                >
+                  🔐 Access Management
+                </button>
+              )}
               <button
                 type="button"
                 className="cs-dropdown-item"
@@ -523,6 +566,20 @@ export default function TopHeader() {
                 }}
               >
                 System Diagnostics
+              </button>
+              <div className="cs-dropdown-divider" />
+              <button
+                type="button"
+                className="cs-dropdown-item"
+                style={{ color: '#EF4444', fontWeight: 500 }}
+                role="menuitem"
+                onClick={async () => {
+                  setShowProfileMenu(false);
+                  await logout();
+                  navigate('/login');
+                }}
+              >
+                Sign Out →
               </button>
             </div>
           )}

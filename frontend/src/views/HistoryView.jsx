@@ -4,10 +4,13 @@ import { getAnalyses, getAnalysis, deleteAnalysis } from '../services/apiClient'
 import FindingPreviewModal from '../components/dashboard/FindingPreviewModal';
 import ConfirmDialog from '../components/common/ConfirmDialog';
 import { useToast } from '../components/common/ToastContext';
+import { useAuth } from '../context/AuthContext';
 import StatusBadge from '../components/StatusBadge';
 import { CodeFileIcon } from '../components/dashboard/Icons';
 
 export default function HistoryView() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'ADMIN';
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -265,13 +268,15 @@ export default function HistoryView() {
               >
                 ↻ Refresh Analysis
               </button>
-              <button
-                type="button"
-                className="btn btn-danger btn-sm"
-                onClick={(e) => handleDeleteRecord(selectedId, e)}
-              >
-                Delete
-              </button>
+              {isAdmin && (
+                <button
+                  type="button"
+                  className="btn btn-danger btn-sm"
+                  onClick={(e) => handleDeleteRecord(selectedId, e)}
+                >
+                  Delete
+                </button>
+              )}
             </div>
           </div>
 
@@ -788,14 +793,16 @@ export default function HistoryView() {
                             >
                               Details →
                             </button>
-                            <button
-                              type="button"
-                              className="btn btn-danger btn-sm"
-                              aria-label={`Delete analysis record ${id}`}
-                              onClick={(e) => handleDeleteRecord(id, e)}
-                            >
-                              Delete
-                            </button>
+                            {isAdmin && (
+                              <button
+                                type="button"
+                                className="btn btn-danger btn-sm"
+                                aria-label={`Delete analysis record ${id}`}
+                                onClick={(e) => handleDeleteRecord(id, e)}
+                              >
+                                Delete
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );

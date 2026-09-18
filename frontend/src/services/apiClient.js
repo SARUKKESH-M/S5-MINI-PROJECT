@@ -26,6 +26,7 @@ export async function apiFetch(endpoint, options = {}) {
   }
 
   const config = {
+    credentials: options.credentials || 'include',
     ...options,
     headers: {
       ...defaultHeaders,
@@ -53,6 +54,20 @@ export async function apiFetch(endpoint, options = {}) {
       const err = new Error(errorMsg);
       err.status = response.status;
       err.data = data;
+
+      // Notify application of session invalidation or deactivation
+      if (typeof window !== 'undefined') {
+        if (response.status === 401 && !endpoint.includes('/auth/me') && !endpoint.includes('/auth/google')) {
+          window.dispatchEvent(new CustomEvent('codesentinel:session-expired', {
+            detail: { endpoint, status: 401, message: errorMsg }
+          }));
+        } else if (response.status === 403 && !endpoint.includes('/auth/google') && !endpoint.startsWith('/admin')) {
+          window.dispatchEvent(new CustomEvent('codesentinel:access-denied', {
+            detail: { endpoint, status: 403, message: errorMsg }
+          }));
+        }
+      }
+
       throw err;
     }
 
@@ -103,6 +118,20 @@ export async function apiGet(endpoint, params = null) {
 export async function apiPost(endpoint, body = null) {
   return apiFetch(endpoint, {
     method: 'POST',
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
+/**
+ * Perform a PATCH request with JSON payload.
+ * 
+ * @param {string} endpoint 
+ * @param {any} [body] Object payload to serialize as JSON
+ * @returns {Promise<any>}
+ */
+export async function apiPatch(endpoint, body = null) {
+  return apiFetch(endpoint, {
+    method: 'PATCH',
     body: body ? JSON.stringify(body) : undefined,
   });
 }
@@ -398,5 +427,125 @@ export async function getSuppressionAnalytics({ timeWindow = '30d', repositoryId
   if (timeWindow) params.time_window = timeWindow;
   if (repositoryId) params.repository_id = repositoryId;
   return apiGet('/analytics/suppressions', params);
+}
+
+// ---------------------------------------------------------------------------
+// Confirmed Google Authentication & Session Endpoints (Phase A4 / A5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Exchange Google ID Token for an authenticated CodeSentinel session (POST /auth/google)
+ * 
+ * @param {string} idToken - Raw JWT token from Google Identity Services
+ * @returns {Promise<{ status: string, user: Object }>}
+ */
+export async function loginWithGoogle(idToken) {
+  if (!idToken) {
+    throw new Error('Google ID token is required');
+  }
+  return apiPost('/auth/google', { id_token: idToken });
+}
+
+/**
+ * Fetch currently authenticated user session information (GET /auth/me)
+ * 
+ * @returns {Promise<Object>} UserRecord representation
+ */
+export async function fetchCurrentUser() {
+  return apiGet('/auth/me');
+}
+
+/**
+ * Terminate authenticated user session (POST /auth/logout)
+ * 
+ * @returns {Promise<{ status: string, message: string }>}
+ */
+export async function logoutUser() {
+  return apiPost('/auth/logout');
+}
+
+// ---------------------------------------------------------------------------
+// Confirmed Admin Access Management Endpoints (Phase A7)
+// ---------------------------------------------------------------------------
+
+/**
+ * Retrieve paginated listing of authorized users (GET /admin/users)
+ * 
+ * @param {Object} [options]
+ * @param {number} [options.limit=50]
+ * @param {number} [options.offset=0]
+ * @param {string} [options.role=null] 'ADMIN' | 'USER'
+ * @param {string} [options.status=null] 'ACTIVE' | 'DISABLED'
+ * @returns {Promise<{ users: Array<Object>, total_count: number }>}
+ */
+export async function getAdminUsers({ limit = 50, offset = 0, role = null, status = null } = {}) {
+  const params = { limit, offset };
+  if (role) params.role = role;
+  if (status) params.status = status;
+  return apiGet('/admin/users', params);
+}
+
+/**
+ * Pre-authorize a Google email address (POST /admin/users)
+ * 
+ * @param {Object} payload
+ * @param {string} payload.email
+ * @param {string} [payload.role='USER']
+ * @param {string} [payload.full_name]
+ * @returns {Promise<Object>} Created UserAdminDetailResponse
+ */
+export async function preAuthorizeUser({ email, role = 'USER', full_name = null }) {
+  if (!email || !email.trim()) {
+    throw new Error('Email is required for pre-authorization');
+  }
+  const payload = {
+    email: email.trim(),
+    role: (role || 'USER').toUpperCase(),
+  };
+  if (full_name && full_name.trim()) {
+    payload.full_name = full_name.trim();
+  }
+  return apiPost('/admin/users', payload);
+}
+
+/**
+ * Activate or disable a user account (PATCH /admin/users/{user_id}/status)
+ * 
+ * @param {string} userId
+ * @param {'ACTIVE'|'DISABLED'} status
+ * @returns {Promise<Object>} Updated UserAdminDetailResponse
+ */
+export async function updateUserStatus(userId, status) {
+  if (!userId) throw new Error('userId is required');
+  if (!status) throw new Error('status is required');
+  return apiPatch(`/admin/users/${encodeURIComponent(userId)}/status`, {
+    status: status.toUpperCase(),
+  });
+}
+
+/**
+ * Promote or demote a user's role (PATCH /admin/users/{user_id}/role)
+ * 
+ * @param {string} userId
+ * @param {'ADMIN'|'USER'} role
+ * @returns {Promise<Object>} Updated UserAdminDetailResponse
+ */
+export async function updateUserRole(userId, role) {
+  if (!userId) throw new Error('userId is required');
+  if (!role) throw new Error('role is required');
+  return apiPatch(`/admin/users/${encodeURIComponent(userId)}/role`, {
+    role: role.toUpperCase(),
+  });
+}
+
+/**
+ * Revoke user authorization and remove user record (DELETE /admin/users/{user_id})
+ * 
+ * @param {string} userId
+ * @returns {Promise<{ status: string, message: string }>}
+ */
+export async function revokeUserAccess(userId) {
+  if (!userId) throw new Error('userId is required');
+  return apiDelete(`/admin/users/${encodeURIComponent(userId)}`);
 }
 

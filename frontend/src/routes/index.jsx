@@ -1,7 +1,10 @@
 import React, { lazy, Suspense } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, Outlet } from 'react-router-dom';
 
 import DashboardView from '../views/DashboardView';
+import LoginView from '../views/LoginView';
+import ProtectedRoute from './ProtectedRoute';
+import Sidebar from '../components/dashboard/Sidebar';
 import TopHeader from '../components/dashboard/TopHeader';
 import Breadcrumbs from '../components/common/Breadcrumbs';
 
@@ -57,11 +60,25 @@ function PageLayout({ children }) {
   );
 }
 
+function WorkspaceLayout() {
+  return (
+    <div className="cs-app-layout">
+      <Sidebar />
+      <Outlet />
+    </div>
+  );
+}
+
 export default function AppRoutes() {
   return (
     <Routes>
-      <Route path="/" element={<DashboardView />} />
-      <Route path="/dashboard" element={<DashboardView />} />
+      {/* Public Login Route */}
+      <Route path="/login" element={<LoginView />} />
+
+      {/* Protected Application Workspace Routes */}
+      <Route element={<ProtectedRoute><WorkspaceLayout /></ProtectedRoute>}>
+        <Route path="/" element={<DashboardView />} />
+        <Route path="/dashboard" element={<DashboardView />} />
       <Route
         path="/analyze"
         element={
@@ -160,6 +177,7 @@ export default function AppRoutes() {
           </PageLayout>
         }
       />
+      </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

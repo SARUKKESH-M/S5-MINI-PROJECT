@@ -51,6 +51,14 @@ export default defineConfig({
             return '/index.html';
           }
         },
+      },
+      '/auth': {
+        target: process.env.VITE_BACKEND_URL || 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/admin': {
+        target: process.env.VITE_BACKEND_URL || 'http://localhost:8000',
+        changeOrigin: true,
       }
     }
   }

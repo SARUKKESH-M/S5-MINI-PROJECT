@@ -5,9 +5,14 @@ and findings from persistent storage.
 """
 
 from typing import Any, Dict, Optional
-from fastapi import APIRouter, Body, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from backend.analysis.storage.store import AnalysisStore
+
+try:
+    from backend.app.core.auth import require_admin_user
+except ImportError:
+    from app.core.auth import require_admin_user
 
 router = APIRouter(tags=["Analysis History"])
 
@@ -79,7 +84,7 @@ def get_findings_endpoint(analysis_id: str):
     }
 
 
-@router.delete("/analyses/{analysis_id}")
+@router.delete("/analyses/{analysis_id}", dependencies=[Depends(require_admin_user)])
 def delete_analysis_endpoint(analysis_id: str):
     """Delete a single analysis record and cascade delete its associated findings."""
     store = _get_store()

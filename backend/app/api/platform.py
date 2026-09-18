@@ -5,7 +5,7 @@ Exposes safe endpoints for health, readiness, release readiness verification,
 capabilities/version info, policy profiles, and internal observability metrics.
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Any, Dict, List, Optional
 
 try:
@@ -14,12 +14,14 @@ try:
     from backend.app.core.metrics import metrics_collector
     from backend.app.core.readiness_verifier import evaluate_platform_release_readiness
     from backend.analysis.policy import list_available_policies, get_policy_profile
+    from backend.app.core.auth import require_active_user
 except ImportError:
     from app.core.health import get_platform_health, get_platform_readiness
     from app.core.capabilities import get_platform_capabilities
     from app.core.metrics import metrics_collector
     from app.core.readiness_verifier import evaluate_platform_release_readiness
     from analysis.policy import list_available_policies, get_policy_profile
+    from app.core.auth import require_active_user
 
 router = APIRouter(prefix="/platform", tags=["Platform & Capabilities"])
 
@@ -49,19 +51,19 @@ def platform_info() -> Dict[str, Any]:
     return get_platform_capabilities()
 
 
-@router.get("/policies")
+@router.get("/policies", dependencies=[Depends(require_active_user)])
 def platform_policies() -> List[Dict[str, Any]]:
     """Returns list of available security analysis policy profiles."""
     return list_available_policies()
 
 
-@router.get("/metrics")
+@router.get("/metrics", dependencies=[Depends(require_active_user)])
 def platform_metrics() -> Dict[str, Any]:
     """Returns structured internal observability metrics."""
     return metrics_collector.get_summary()
 
 
-@router.get("/developers")
+@router.get("/developers", dependencies=[Depends(require_active_user)])
 def platform_developers(
     limit: Optional[int] = Query(20, ge=1, le=100, description="Maximum number of developers to return"),
     repository: Optional[str] = Query(None, description="Optional repository name filter"),
