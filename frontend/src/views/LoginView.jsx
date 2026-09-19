@@ -43,6 +43,7 @@ export default function LoginView() {
   const [localError, setLocalError] = useState(null);
   const [showDevOptions, setShowDevOptions] = useState(false);
   const [customToken, setCustomToken] = useState('');
+  const [gisReady, setGisReady] = useState(false);
   const googleBtnContainerRef = useRef(null);
 
   const navigate = useNavigate();
@@ -61,41 +62,76 @@ export default function LoginView() {
   // Check if Google Client ID is configured
   const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 
-  // Initialize Google Identity Services (GIS) if available
+  // Initialize Google Identity Services (GIS) with polling fallback for async script load
   useEffect(() => {
-    if (!googleClientId || !window.google?.accounts?.id || isAuthenticated) return;
+    if (!googleClientId || isAuthenticated) return;
 
-    try {
-      window.google.accounts.id.initialize({
-        client_id: googleClientId,
-        callback: async (response) => {
-          if (response?.credential) {
-            setSubmitting(true);
-            setLocalError(null);
-            try {
-              await login(response.credential);
-              navigate(destination, { replace: true });
-            } catch (err) {
-              setLocalError(err);
-            } finally {
-              setSubmitting(false);
+    let isMounted = true;
+
+    const initializeGis = () => {
+      if (!window.google?.accounts?.id) return false;
+
+      try {
+        window.google.accounts.id.initialize({
+          client_id: googleClientId,
+          callback: async (response) => {
+            if (response?.credential) {
+              setSubmitting(true);
+              setLocalError(null);
+              try {
+                await login(response.credential);
+                navigate(destination, { replace: true });
+              } catch (err) {
+                setLocalError(err);
+              } finally {
+                setSubmitting(false);
+              }
             }
-          }
-        },
-      });
-
-      if (googleBtnContainerRef.current) {
-        window.google.accounts.id.renderButton(googleBtnContainerRef.current, {
-          theme: 'outline',
-          size: 'large',
-          width: '100%',
-          text: 'continue_with',
-          shape: 'rectangular',
+          },
         });
+
+        if (googleBtnContainerRef.current) {
+          googleBtnContainerRef.current.innerHTML = '';
+          window.google.accounts.id.renderButton(googleBtnContainerRef.current, {
+            theme: 'outline',
+            size: 'large',
+            width: '100%',
+            text: 'continue_with',
+            shape: 'rectangular',
+          });
+        }
+
+        if (isMounted) {
+          setGisReady(true);
+        }
+        return true;
+      } catch (e) {
+        console.warn('Google Identity Services initialization error:', e);
+        return false;
       }
-    } catch (e) {
-      console.warn('Google Identity Services initialization skipped:', e);
+    };
+
+    if (!initializeGis()) {
+      const pollInterval = setInterval(() => {
+        if (initializeGis()) {
+          clearInterval(pollInterval);
+        }
+      }, 100);
+
+      const timeout = setTimeout(() => {
+        clearInterval(pollInterval);
+      }, 5000);
+
+      return () => {
+        isMounted = false;
+        clearInterval(pollInterval);
+        clearTimeout(timeout);
+      };
     }
+
+    return () => {
+      isMounted = false;
+    };
   }, [googleClientId, isAuthenticated, login, navigate, destination]);
 
   // Primary Google Login Action handler
@@ -106,6 +142,30 @@ export default function LoginView() {
 
     // If GIS is present, trigger standard Google prompt
     if (window.google?.accounts?.id && googleClientId) {
+      if (!gisReady) {
+        try {
+          window.google.accounts.id.initialize({
+            client_id: googleClientId,
+            callback: async (response) => {
+              if (response?.credential) {
+                setSubmitting(true);
+                setLocalError(null);
+                try {
+                  await login(response.credential);
+                  navigate(destination, { replace: true });
+                } catch (err) {
+                  setLocalError(err);
+                } finally {
+                  setSubmitting(false);
+                }
+              }
+            },
+          });
+          setGisReady(true);
+        } catch (err) {
+          console.warn('GIS initialize on click failed:', err);
+        }
+      }
       window.google.accounts.id.prompt();
       return;
     }
@@ -207,7 +267,7 @@ export default function LoginView() {
           <div ref={googleBtnContainerRef} style={{ width: '100%' }} />
 
           {/* Standard accessible Continue with Google button */}
-          {(!googleClientId || !window.google?.accounts?.id) && (
+          {(!googleClientId || !gisReady) && (
             <button
               type="button"
               className="cs-google-btn"
