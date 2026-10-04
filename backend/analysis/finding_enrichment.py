@@ -185,12 +185,12 @@ def enrich_findings(
         query = build_structured_rag_query(item)
 
         # 2. Vector / Hybrid RAG Retrieval (Deduplicated per stable query signature)
-        cache_key = f"{query.strip().lower()}::topk=3::{db_path or 'default'}"
+        cache_key = f"{query.strip().lower()}::topk=5::{db_path or 'default'}"
         if cache_key in rag_context_cache:
             context = rag_context_cache[cache_key]
         else:
             try:
-                context = build_security_analysis_context(query, top_k=3, db_path=db_path)
+                context = build_security_analysis_context(query, top_k=5, db_path=db_path)
             except Exception:
                 context = {}
             rag_context_cache[cache_key] = context
