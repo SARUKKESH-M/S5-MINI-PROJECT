@@ -17,11 +17,19 @@ Verifies:
 import pytest
 from ast_engine.security_analyzer import analyze_security_structure
 from ast_engine.taint.models import TaintState
+from backend.analysis.deterministic_findings import generate_deterministic_findings
+from backend.analysis.report_service import compute_review_status
+from backend.analysis.security_gate import evaluate_security_gate
 
 
 def _get_signals(source: str, file_path: str = "test_app.py"):
     res = analyze_security_structure(source, file_path=file_path)
     return res["security_signals"]
+
+
+def _get_findings(source: str, file_path: str = "test_app.py"):
+    signals = _get_signals(source, file_path=file_path)
+    return generate_deterministic_findings(signals)
 
 
 # ==============================================================================
@@ -363,3 +371,135 @@ def run():
 """
     signals = _get_signals(source)
     assert any(s["category"] == "sql_injection" for s in signals)
+
+
+# ==============================================================================
+# 7. Python Reflected XSS Taint & Security Gate Integration
+# ==============================================================================
+
+def test_python_taint_reflected_xss_triggers_block_gate():
+    source = """
+from flask import request
+
+@app.route("/hello")
+def hello():
+    name = request.args.get("name")
+    return "<h1>Hello " + name + "</h1>"
+"""
+    signals = _get_signals(source)
+    xss_signals = [s for s in signals if s["signal_type"] == "reflected_xss_call"]
+    assert len(xss_signals) == 1
+    assert xss_signals[0]["severity"] == "high"
+    assessment = xss_signals[0].get("argument_assessment", {})
+    assert assessment.get("taint_state") == "TAINTED"
+    assert assessment.get("taint_source") == "request.args"
+
+    findings = _get_findings(source)
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "high"
+    assert findings[0]["title"] == "Reflected Cross-Site Scripting (XSS) Vulnerability"
+
+    summary = {
+        "critical_count": 0,
+        "high_count": 1,
+        "medium_count": 0,
+        "low_count": 0,
+        "info_count": 0,
+    }
+    report = {
+        "status": "success",
+        "review_status": compute_review_status(summary),
+        "summary": summary,
+        "findings": findings,
+    }
+    decision, exit_code, _ = evaluate_security_gate(report)
+    assert decision == "BLOCK"
+    assert exit_code == 1
+
+
+def test_python_taint_reflected_xss_html_escape_triggers_allow_gate():
+    source = """
+import html
+from flask import request
+
+@app.route("/hello")
+def hello():
+    name = request.args.get("name")
+    return "<h1>Hello " + html.escape(name) + "</h1>"
+"""
+    findings = _get_findings(source)
+    assert len(findings) == 0
+
+    summary = {
+        "critical_count": 0,
+        "high_count": 0,
+        "medium_count": 0,
+        "low_count": 0,
+        "info_count": 0,
+    }
+    report = {
+        "status": "success",
+        "review_status": compute_review_status(summary),
+        "summary": summary,
+        "findings": findings,
+    }
+    decision, exit_code, _ = evaluate_security_gate(report)
+    assert decision == "ALLOW"
+    assert exit_code == 0
+
+
+def test_python_taint_reflected_xss_static_html_triggers_allow_gate():
+    source = """
+@app.route("/hello")
+def hello():
+    return "<h1>Hello World</h1>"
+"""
+    findings = _get_findings(source)
+    assert len(findings) == 0
+
+    summary = {
+        "critical_count": 0,
+        "high_count": 0,
+        "medium_count": 0,
+        "low_count": 0,
+        "info_count": 0,
+    }
+    report = {
+        "status": "success",
+        "review_status": compute_review_status(summary),
+        "summary": summary,
+        "findings": findings,
+    }
+    decision, exit_code, _ = evaluate_security_gate(report)
+    assert decision == "ALLOW"
+    assert exit_code == 0
+
+
+def test_python_taint_non_html_return_triggers_allow_gate():
+    source = """
+from flask import request
+
+@app.route("/api/id")
+def get_id():
+    return request.args.get("id")
+"""
+    findings = _get_findings(source)
+    assert len(findings) == 0
+
+    summary = {
+        "critical_count": 0,
+        "high_count": 0,
+        "medium_count": 0,
+        "low_count": 0,
+        "info_count": 0,
+    }
+    report = {
+        "status": "success",
+        "review_status": compute_review_status(summary),
+        "summary": summary,
+        "findings": findings,
+    }
+    decision, exit_code, _ = evaluate_security_gate(report)
+    assert decision == "ALLOW"
+    assert exit_code == 0
+

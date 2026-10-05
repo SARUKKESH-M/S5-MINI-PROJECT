@@ -433,3 +433,113 @@ def test_phase_29_deterministic_evidence_id_and_length_contract():
         assert s["file_path"] == "audit.py"
         assert len(s["evidence"]) <= 240
 
+
+# ===========================================================================
+# Python Reflected XSS (CWE-79) Tests
+# ===========================================================================
+
+def test_python_reflected_xss_flask_route_detected():
+    source = """
+from flask import request
+
+@app.route("/hello")
+def hello():
+    name = request.args.get("name")
+    return "<h1>Hello " + name + "</h1>"
+"""
+    signals = _signals(source)
+    xss = [s for s in signals if s["signal_type"] == "reflected_xss_call"]
+    assert len(xss) == 1
+    assert xss[0]["category"] == "xss"
+    assert xss[0]["severity"] == "high"
+    assert xss[0]["confidence"] == "high"
+
+
+def test_python_reflected_xss_direct_source_detected():
+    source = """
+from flask import request
+
+def hello():
+    return "<h1>Hello " + request.args.get("name") + "</h1>"
+"""
+    signals = _signals(source)
+    xss = [s for s in signals if s["signal_type"] == "reflected_xss_call"]
+    assert len(xss) == 1
+    assert xss[0]["severity"] == "high"
+
+
+def test_python_reflected_xss_fstring_detected():
+    source = """
+from flask import request
+
+def hello():
+    name = request.args.get("name")
+    return f"<div>{name}</div>"
+"""
+    signals = _signals(source)
+    xss = [s for s in signals if s["signal_type"] == "reflected_xss_call"]
+    assert len(xss) == 1
+    assert xss[0]["severity"] == "high"
+
+
+def test_python_reflected_xss_transitive_flow_detected():
+    source = """
+from flask import request
+
+def hello():
+    a = request.args.get("name")
+    b = a
+    return "<p>" + b + "</p>"
+"""
+    signals = _signals(source)
+    xss = [s for s in signals if s["signal_type"] == "reflected_xss_call"]
+    assert len(xss) == 1
+    assert xss[0]["severity"] == "high"
+
+
+def test_python_reflected_xss_html_escape_is_safe():
+    source = """
+import html
+from flask import request
+
+def hello():
+    return "<h1>" + html.escape(request.args.get("name")) + "</h1>"
+"""
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "reflected_xss_call"]
+
+
+def test_python_reflected_xss_static_html_is_safe():
+    source = """
+def hello():
+    return "<h1>Hello World</h1>"
+"""
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "reflected_xss_call"]
+
+
+def test_python_reflected_xss_non_html_tainted_return_is_safe():
+    source = """
+from flask import request
+
+def get_id():
+    return request.args.get("id")
+"""
+    signals = _signals(source)
+    assert not [s for s in signals if s["signal_type"] == "reflected_xss_call"]
+
+
+def test_python_reflected_xss_response_call_sink():
+    source = """
+from flask import request, render_template_string
+
+def hello():
+    name = request.args.get("name")
+    return render_template_string("<h1>Hello " + name + "</h1>")
+"""
+    signals = _signals(source)
+    xss = [s for s in signals if s["signal_type"] == "reflected_xss_call"]
+    assert len(xss) == 1
+    assert xss[0]["severity"] == "high"
+
+

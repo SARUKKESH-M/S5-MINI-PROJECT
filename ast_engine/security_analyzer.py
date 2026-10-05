@@ -1,6 +1,7 @@
 """Static, deterministic security evidence extraction for Python source."""
 
 import hashlib
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ast_engine.python_parser import parse_python_source
@@ -35,6 +36,32 @@ _DESERIALIZATION_SINKS = {
 }
 _NETWORK_OP_NAMES = {"requests.get", "requests.post", "requests.put", "requests.delete", "requests.patch", "httpx.get", "httpx.post", "httpx.put", "httpx.delete", "urllib.request.urlopen"}
 _IGNORED_VAR_NAMES = {"self", "cls", "True", "False", "None"}
+_PY_XSS_CALL_NAMES = {"render_template_string", "make_response", "Response"}
+_HTML_TAG_PATTERN = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]*(?:\s+[^>]*)?>")
+
+
+def _collect_string_literals(node: Optional[Any]) -> List[str]:
+    strings: List[str] = []
+    if node is None:
+        return strings
+
+    def walk_str(n: Any) -> None:
+        if n.type in {"string", "concatenated_string"}:
+            strings.append(_text(n))
+        for c in n.children:
+            walk_str(c)
+
+    walk_str(node)
+    return strings
+
+
+def _contains_html_markup(node: Optional[Any]) -> bool:
+    if node is None:
+        return False
+    for s in _collect_string_literals(node):
+        if _HTML_TAG_PATTERN.search(s):
+            return True
+    return False
 
 
 def _is_file_op_target(target: str) -> bool:
@@ -224,6 +251,53 @@ def analyze_security_structure(source_code: str, file_path: str = "") -> Dict[st
                                "A secret-like parameter is propagated to an Authorization header.",
                                {"flow": "parameter_to_secret_like_variable_to_authorization_header"})
                     credential_reported = True
+            if node.type == "return_statement":
+                ret_expr = node.children[1] if len(node.children) > 1 else None
+                if ret_expr is not None:
+                    eval_expr = ret_expr
+                    if ret_expr.type == "identifier":
+                        vname = _text(ret_expr).strip()
+                        if vname not in parameters:
+                            preceding = [a for a in local_assignments.get(vname, []) if a[0].end_byte <= node.start_byte]
+                            if len(preceding) == 1:
+                                eval_expr = preceding[0][1]
+
+                    if _contains_html_markup(eval_expr):
+                        expr_kind = _expression_kind(eval_expr)
+                        if expr_kind != "literal":
+                            related = list(dict.fromkeys(_extract_related_variables(ret_expr) + _extract_related_variables(eval_expr)))
+                            trace = taint_engine.evaluate_sink_argument(node, ret_expr, local_scope_node=function_node)
+                            if trace is not None and trace.final_state in (TaintState.STATIC, TaintState.SANITIZED):
+                                pass
+                            elif trace is not None and trace.final_state == TaintState.TAINTED:
+                                evidence_text = format_evidence_string(trace.sink, list(trace.sources), list(trace.steps))
+                                assessment = build_argument_assessment(trace)
+                                assessment.update({"expression_kind": expr_kind, "dynamic_value_present": True})
+                                add_signal(
+                                    "reflected_xss_call",
+                                    "xss",
+                                    "high",
+                                    "high",
+                                    "flask.response",
+                                    line,
+                                    evidence_text,
+                                    related,
+                                    "Untrusted input is reflected in HTML output without context-aware escaping.",
+                                    assessment,
+                                )
+                            elif expr_kind in {"string_concatenation", "f_string", "percent_formatting", "format_call"}:
+                                add_signal(
+                                    "reflected_xss_call",
+                                    "xss",
+                                    "high",
+                                    "medium",
+                                    "flask.response",
+                                    line,
+                                    _text(node),
+                                    related,
+                                    "Dynamic content is injected into HTML output without sanitization.",
+                                    {"expression_kind": expr_kind, "dynamic_value_present": True},
+                                )
             if node.type == "call":
                 target, arguments = _get_call_target(node), _call_arguments(node)
                 related = _extract_related_variables(node)
@@ -326,6 +400,43 @@ def analyze_security_structure(source_code: str, file_path: str = "") -> Dict[st
                         "Insecure object deserialization is invoked on potentially untrusted input.",
                         {"deserializer": target, "untrusted_input": True},
                     )
+                elif target and (target.split(".")[-1] in _PY_XSS_CALL_NAMES or target in _PY_XSS_CALL_NAMES):
+                    arg_node = arguments[0] if arguments else None
+                    if arg_node is not None:
+                        arg_kind = _expression_kind(arg_node)
+                        if arg_kind != "literal" and _contains_html_markup(arg_node):
+                            trace = taint_engine.evaluate_sink_argument(node, arg_node, local_scope_node=function_node)
+                            if trace is not None and trace.final_state in (TaintState.STATIC, TaintState.SANITIZED):
+                                pass
+                            elif trace is not None and trace.final_state == TaintState.TAINTED:
+                                evidence_text = format_evidence_string(trace.sink, list(trace.sources), list(trace.steps))
+                                assessment = build_argument_assessment(trace)
+                                assessment.update({"expression_kind": arg_kind, "dynamic_value_present": True})
+                                add_signal(
+                                    "reflected_xss_call",
+                                    "xss",
+                                    "high",
+                                    "high",
+                                    target,
+                                    line,
+                                    evidence_text,
+                                    related,
+                                    "Untrusted input propagates to HTML response call sink.",
+                                    assessment,
+                                )
+                            elif arg_kind in {"string_concatenation", "f_string", "percent_formatting", "format_call"}:
+                                add_signal(
+                                    "reflected_xss_call",
+                                    "xss",
+                                    "high",
+                                    "medium",
+                                    target,
+                                    line,
+                                    _text(node),
+                                    related,
+                                    "Dynamic content is injected into HTML response call without sanitization.",
+                                    {"expression_kind": arg_kind, "dynamic_value_present": True},
+                                )
             for child in node.children:
                 if child.type not in {"function_definition", "async_function_definition", "class_definition"}:
                     walk(child)

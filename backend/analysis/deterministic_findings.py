@@ -11,6 +11,7 @@ _TITLES = {
     "path_traversal_call": "Potential Path Traversal / Unsafe File Access",
     "insecure_deserialization_call": "Insecure Deserialization Risk",
     "dom_xss_call": "Cross-Site Scripting (DOM XSS) Vulnerability",
+    "reflected_xss_call": "Reflected Cross-Site Scripting (XSS) Vulnerability",
 }
 _CATEGORIES = {
     "sql_injection": "Injection",

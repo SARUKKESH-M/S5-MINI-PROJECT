@@ -21,18 +21,38 @@ _PY_COMMAND_TARGETS = {
     "subprocess.run", "subprocess.Popen", "subprocess.call",
     "subprocess.check_call", "subprocess.check_output",
 }
+_PY_XSS_CALL_NAMES = {
+    "render_template_string",
+    "make_response",
+    "Response",
+}
 
 
 def match_python_sink(call_node: Any, file_path: str = "") -> Optional[TaintSink]:
-    """Inspect a Python call AST node and return an approved TaintSink if recognized."""
-    if call_node is None or call_node.type != "call":
+    """Inspect a Python AST node (call or return) and return an approved TaintSink if recognized."""
+    if call_node is None:
         return None
 
     line = call_node.start_point[0] + 1
+
+    # 1. Return statement sink for HTML response output
+    if call_node.type == "return_statement":
+        return TaintSink(
+            name="flask.response",
+            category="xss",
+            line=line,
+            file_path=file_path,
+            target_arg_indices=(0,),
+            ast_pattern="return_html",
+        )
+
+    if call_node.type != "call":
+        return None
+
     fn_node = call_node.child_by_field_name("function")
     target_str = _node_text(fn_node).strip()
 
-    # 1. Database execution sink
+    # 2. Database execution sink
     fn_leaf = target_str.split(".")[-1]
     if fn_leaf in _PY_DB_EXEC_NAMES:
         return TaintSink(
@@ -44,11 +64,22 @@ def match_python_sink(call_node: Any, file_path: str = "") -> Optional[TaintSink
             ast_pattern=target_str,
         )
 
-    # 2. Command execution sink
+    # 3. Command execution sink
     if target_str in _PY_COMMAND_TARGETS or target_str.startswith("os.spawn"):
         return TaintSink(
             name=target_str,
             category="command_execution",
+            line=line,
+            file_path=file_path,
+            target_arg_indices=(0,),
+            ast_pattern=target_str,
+        )
+
+    # 4. Known HTML-producing response calls
+    if fn_leaf in _PY_XSS_CALL_NAMES or target_str in _PY_XSS_CALL_NAMES:
+        return TaintSink(
+            name=target_str,
+            category="xss",
             line=line,
             file_path=file_path,
             target_arg_indices=(0,),

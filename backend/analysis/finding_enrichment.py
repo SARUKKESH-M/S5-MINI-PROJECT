@@ -29,6 +29,7 @@ SIGNAL_TOPIC_MAPPING = {
     "path_traversal": "path_traversal",
     "cross_site_scripting": "xss",
     "dom_xss_call": "xss",
+    "reflected_xss_call": "xss",
     "missing_authentication": "authentication",
     "cross_site_request_forgery": "csrf",
     "unrestricted_file_upload": "file_upload",
