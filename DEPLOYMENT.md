@@ -32,8 +32,17 @@ All runtime options are environment-driven. Secrets MUST ONLY be supplied via en
 | `GITHUB_TOKEN` | *(Secret)* | Optional GitHub Personal Access Token for PR integrations. |
 | `GITHUB_WEBHOOK_SECRET` | *(Secret)* | Optional HMAC SHA-256 secret for GitHub webhook verification. |
 | `CHROMA_DB_PATH` | `/app/data/chroma` | Persistent vector store directory path. |
+| `SLACK_WEBHOOK_URL` | *(Optional Secret)* | Optional Slack incoming webhook URL for PR security alerts. |
 
----
+### External Alerting Configuration (Slack)
+
+- **Optional Integration**: `SLACK_WEBHOOK_URL` allows CodeSentinel to post Block Kit formatted security alerts for GitHub Pull Request review events (`pull_request` webhook ingestion).
+- **Graceful Degradation**: When `SLACK_WEBHOOK_URL` is omitted, `None`, empty, or whitespace-only, Slack notifications are cleanly skipped (`status: skipped`, `reason: webhook_not_configured`) without altering analysis verdicts or blocking PR processing.
+- **Security & Secret Isolation**:
+  - The incoming webhook URL contains sensitive endpoint credentials and must **NEVER** be committed to source control, stored in client-side code, or exposed to the frontend.
+  - In containerized or cloud deployments (Docker Compose, Render, Kubernetes), supply `SLACK_WEBHOOK_URL` exclusively via secure server-side environment variables or secret managers.
+  - Webhook URLs must use secure HTTPS (`https://`). Dynamic fields in the payload are automatically sanitized to redact sensitive tokens prior to transmission.
+- **Scope**: External Slack notifications are triggered for GitHub PR analysis workflows. Standalone direct analysis endpoints (`/analyze`, `/repository/analyze`) and local pre-commit hooks do not dispatch external alerts.
 
 ## 3. Local Docker Build & Execution
 

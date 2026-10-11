@@ -24,6 +24,7 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
       - CHROMA_DB_PATH=/app/data/chroma
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
     volumes:
       - codesentinel-data:/app/data
     healthcheck:
