@@ -692,6 +692,23 @@ def orchestrate_webhook_event(
                 root_status = "success"
                 status_reason = None
 
+            # Phase 3D-2A: Delivery claim and commit reservation lifecycle management
+            active_store = store or _get_analysis_store(db_path=db_path)
+            if root_status == "success":
+                # Complete commit reservation upon terminal successful publication
+                if active_store is not None:
+                    active_store.complete_pr_commit_reservation(
+                        owner=clean_owner,
+                        repository=clean_repo,
+                        pr_number=clean_pr_num,
+                        head_sha=clean_head_sha,
+                        analysis_id=report.get("analysis_id"),
+                    )
+            elif root_status in ("publication_failed", "partial_success"):
+                # Retryable publication failure: release delivery claim and commit reservation
+                release_webhook_delivery(delivery_id, db_path=db_path)
+                release_pr_commit_reservation(clean_owner, clean_repo, clean_pr_num, clean_head_sha, db_path=db_path)
+
             result = {
                 "status": root_status,
                 "event": "pull_request",

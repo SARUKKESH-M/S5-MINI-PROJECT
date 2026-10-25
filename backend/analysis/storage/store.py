@@ -615,21 +615,7 @@ class AnalysisStore:
                     ),
                 )
 
-            # If valid PR commit identity, complete the reservation atomically
-            if clean_owner and clean_repo and clean_pr is not None and clean_head:
-                commit_key = f"{clean_owner.lower()}/{clean_repo.lower()}:{clean_pr}:{clean_head.lower()}"
-                conn.execute(
-                    """
-                    INSERT INTO pr_commit_reservations (
-                        commit_key, owner, repository, pr_number, head_sha, status, analysis_id, created_at, expires_at
-                    ) VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, '9999-12-31T23:59:59+00:00')
-                    ON CONFLICT(commit_key) DO UPDATE SET
-                        status = 'completed',
-                        analysis_id = excluded.analysis_id,
-                        expires_at = '9999-12-31T23:59:59+00:00';
-                    """,
-                    (commit_key, clean_owner, clean_repo, clean_pr, clean_head, analysis_id, created_at)
-                )
+            pass
 
         return analysis_result
 
