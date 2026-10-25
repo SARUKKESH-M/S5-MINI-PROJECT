@@ -48,17 +48,27 @@ async def github_webhook_endpoint(
     4. Passes payload to end-to-end webhook orchestrator.
     """
     raw_body = await request.body()
+
+    # Ingress defensive size limit check
+    max_size = getattr(settings, "MAX_REQUEST_SIZE_BYTES", 10 * 1024 * 1024)
+    if len(raw_body) > max_size:
+        raise HTTPException(
+            status_code=getattr(status, "HTTP_413_CONTENT_TOO_LARGE", 413),
+            detail=f"Request payload exceeds maximum allowed size of {max_size} bytes"
+        )
+
     webhook_secret = getattr(settings, "GITHUB_WEBHOOK_SECRET", None)
+    has_secret = bool(webhook_secret and webhook_secret.strip())
 
     # 1. Enforce signature verification (fail-closed in production)
     env = (getattr(settings, "APP_ENV", None) or getattr(settings, "ENVIRONMENT", "development")).strip().lower()
-    if env == "production" and (not webhook_secret or not webhook_secret.strip()):
+    if env == "production" and not has_secret:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Production webhook secret is not configured"
         )
 
-    if webhook_secret and webhook_secret.strip():
+    if has_secret:
         if not x_hub_signature_256:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -74,6 +84,14 @@ async def github_webhook_endpoint(
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid webhook signature"
+            )
+    else:
+        # Outside production when secret is unconfigured:
+        # If a signature header is supplied, reject because it cannot be verified against a configured secret.
+        if x_hub_signature_256 and x_hub_signature_256.strip():
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Cannot verify signature: webhook secret is not configured"
             )
 
     # 2. Parse JSON payload safely after signature verification
