@@ -25,9 +25,37 @@ export async function apiFetch(endpoint, options = {}) {
     defaultHeaders['Content-Type'] = 'application/json';
   }
 
+  // Handle optional request timeout and signal combination
+  const controller = new AbortController();
+  let isTimedOut = false;
+  let timeoutId = null;
+
+  if (typeof options.timeout === 'number' && options.timeout > 0) {
+    timeoutId = setTimeout(() => {
+      isTimedOut = true;
+      controller.abort();
+    }, options.timeout);
+  }
+
+  const handleExternalAbort = () => {
+    controller.abort(options.signal?.reason);
+  };
+
+  if (options.signal) {
+    if (options.signal.aborted) {
+      controller.abort(options.signal.reason);
+    } else {
+      options.signal.addEventListener('abort', handleExternalAbort, { once: true });
+    }
+  }
+
+  // Exclude custom timeout property from raw fetch options
+  const { timeout: _unusedTimeout, signal: _unusedSignal, ...fetchOptions } = options;
+
   const config = {
     credentials: options.credentials || 'include',
-    ...options,
+    ...fetchOptions,
+    signal: controller.signal,
     headers: {
       ...defaultHeaders,
       ...options.headers,
@@ -73,14 +101,49 @@ export async function apiFetch(endpoint, options = {}) {
 
     return data;
   } catch (error) {
-    // If it's already an HTTP error with status, rethrow
-    if (error.status) {
+    // If it's already an HTTP error with status from backend, rethrow immediately
+    if (error.status && error.status !== 0) {
       throw error;
     }
-    // Network errors (e.g. server offline)
+
+    // Distinguish timeout errors from auth/network/abort errors
+    if (isTimedOut) {
+      const timeoutError = new Error(`Request timed out after ${options.timeout}ms`);
+      timeoutError.status = 408;
+      timeoutError.isTimeout = true;
+      timeoutError.name = 'TimeoutError';
+      throw timeoutError;
+    }
+
+    // Normalize caller-triggered abort/cancellation
+    const isCallerAborted = Boolean(options.signal?.aborted) || error.name === 'AbortError' || error.isAborted === true;
+    if (isCallerAborted) {
+      const abortReason = options.signal?.reason;
+      const message = (abortReason instanceof Error ? abortReason.message : abortReason)
+        || error.message
+        || 'Request was aborted';
+      const abortError = new Error(message);
+      abortError.status = 0;
+      abortError.name = 'AbortError';
+      abortError.isAborted = true;
+      if (abortReason) {
+        abortError.cause = abortReason;
+      }
+      throw abortError;
+    }
+
+    // Ordinary network errors (e.g. server offline, CORS failure)
     const networkError = new Error(error.message || 'Network request failed');
     networkError.status = 0;
+    networkError.isNetworkError = true;
     throw networkError;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+    if (options.signal) {
+      options.signal.removeEventListener('abort', handleExternalAbort);
+    }
   }
 }
 
@@ -89,9 +152,10 @@ export async function apiFetch(endpoint, options = {}) {
  * 
  * @param {string} endpoint 
  * @param {Record<string, any>} [params] Query string parameters
+ * @param {RequestInit & { timeout?: number }} [options] Additional fetch options
  * @returns {Promise<any>}
  */
-export async function apiGet(endpoint, params = null) {
+export async function apiGet(endpoint, params = null, options = {}) {
   let url = endpoint;
   if (params && typeof params === 'object') {
     const query = new URLSearchParams();
@@ -105,7 +169,7 @@ export async function apiGet(endpoint, params = null) {
       url += (url.includes('?') ? '&' : '?') + queryString;
     }
   }
-  return apiFetch(url, { method: 'GET' });
+  return apiFetch(url, { method: 'GET', ...options });
 }
 
 /**
@@ -449,10 +513,11 @@ export async function loginWithGoogle(idToken) {
 /**
  * Fetch currently authenticated user session information (GET /auth/me)
  * 
+ * @param {RequestInit & { timeout?: number }} [options] Additional fetch options
  * @returns {Promise<Object>} UserRecord representation
  */
-export async function fetchCurrentUser() {
-  return apiGet('/auth/me');
+export async function fetchCurrentUser(options = {}) {
+  return apiGet('/auth/me', null, options);
 }
 
 /**

@@ -1,9 +1,13 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { fetchCurrentUser, loginWithGoogle, logoutUser } from '../services/apiClient';
+
+const INITIAL_GATE_DEADLINE_MS = Number(import.meta.env?.VITE_AUTH_GATE_DEADLINE_MS) || 3500;
+const SESSION_CHECK_TIMEOUT_MS = Number(import.meta.env?.VITE_SESSION_TIMEOUT_MS) || 15000;
 
 const AuthContext = createContext({
   user: null,
   loading: true,
+  sessionPending: true,
   isAuthenticated: false,
   authError: null,
   clearAuthError: () => {},
@@ -44,12 +48,14 @@ function parseAuthError(err) {
     };
   }
 
-  if (status === 0) {
+  if (status === 0 || err.isTimeout) {
     return {
-      status: 0,
+      status: err.status || 0,
       type: 'NETWORK_ERROR',
       title: 'Connection Error',
-      message: 'Unable to communicate with CodeSentinel security service. Ensure backend is running.',
+      message: err.isTimeout
+        ? 'Session verification request timed out. Please check your backend connection.'
+        : 'Unable to communicate with CodeSentinel security service. Ensure backend is running.',
       detail,
     };
   }
@@ -63,10 +69,12 @@ function parseAuthError(err) {
   };
 }
 
-export function AuthProvider({ children }) {
+export function AuthProvider({ children, gateDeadlineMs = INITIAL_GATE_DEADLINE_MS }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [sessionPending, setSessionPending] = useState(true);
   const [authError, setAuthError] = useState(null);
+  const authSeqRef = useRef(0);
 
   const clearAuthError = useCallback(() => {
     setAuthError(null);
@@ -76,37 +84,50 @@ export function AuthProvider({ children }) {
    * Refreshes current user state from the authoritative backend session
    */
   const refreshUser = useCallback(async () => {
+    const seq = ++authSeqRef.current;
     try {
-      const raw = await fetchCurrentUser();
+      const raw = await fetchCurrentUser({ timeout: SESSION_CHECK_TIMEOUT_MS });
       const userData = raw?.user || raw;
-      setUser(userData);
-      setAuthError(null);
+      if (authSeqRef.current === seq) {
+        setUser(userData);
+        setAuthError(null);
+      }
       return userData;
     } catch (err) {
-      setUser(null);
-      if (err.status !== 401) {
-        setAuthError(parseAuthError(err));
+      if (authSeqRef.current === seq) {
+        setUser(null);
+        if (err.status !== 401 && !err.isTimeout && !err.isAborted) {
+          setAuthError(parseAuthError(err));
+        }
       }
       return null;
     }
   }, []);
 
   /**
-   * Initial session check on application boot
+   * Initial session check on application boot with fast gate deadline and race-safe background resolution
    */
   useEffect(() => {
     let isMounted = true;
+    const seq = ++authSeqRef.current;
+
+    // Safety deadline: unblock gate UI after gateDeadlineMs so user is never frozen
+    const deadlineTimer = setTimeout(() => {
+      if (isMounted && authSeqRef.current === seq) {
+        setLoading(false);
+      }
+    }, gateDeadlineMs);
 
     async function checkInitialSession() {
       try {
-        const raw = await fetchCurrentUser();
+        const raw = await fetchCurrentUser({ timeout: SESSION_CHECK_TIMEOUT_MS });
         const userData = raw?.user || raw;
-        if (isMounted) {
+        if (isMounted && authSeqRef.current === seq) {
           setUser(userData);
           setAuthError(null);
         }
       } catch (err) {
-        if (isMounted) {
+        if (isMounted && authSeqRef.current === seq) {
           setUser(null);
           // Only show error banner if explicit access-denied/disabled status
           if (err.status === 403) {
@@ -114,8 +135,10 @@ export function AuthProvider({ children }) {
           }
         }
       } finally {
-        if (isMounted) {
+        clearTimeout(deadlineTimer);
+        if (isMounted && authSeqRef.current === seq) {
           setLoading(false);
+          setSessionPending(false);
         }
       }
     }
@@ -124,15 +147,18 @@ export function AuthProvider({ children }) {
 
     return () => {
       isMounted = false;
+      clearTimeout(deadlineTimer);
     };
-  }, []);
+  }, [gateDeadlineMs]);
 
   /**
    * Listen for global session invalidation events emitted by apiClient
    */
   useEffect(() => {
     const handleSessionExpired = () => {
+      authSeqRef.current++;
       setUser(null);
+      setSessionPending(false);
       setAuthError({
         status: 401,
         type: 'UNAUTHENTICATED',
@@ -145,7 +171,9 @@ export function AuthProvider({ children }) {
       const detail = e.detail?.message || '';
       const isDisabled = detail.toLowerCase().includes('disabled') || detail.toLowerCase().includes('deactivated');
       if (isDisabled) {
+        authSeqRef.current++;
         setUser(null);
+        setSessionPending(false);
         setAuthError({
           status: 403,
           type: 'DISABLED',
@@ -175,14 +203,19 @@ export function AuthProvider({ children }) {
       if (document.visibilityState === 'visible' && Date.now() - lastChecked > 60000) {
         lastChecked = Date.now();
         if (user) {
+          const seq = ++authSeqRef.current;
           try {
-            const raw = await fetchCurrentUser();
+            const raw = await fetchCurrentUser({ timeout: SESSION_CHECK_TIMEOUT_MS });
             const freshUser = raw?.user || raw;
-            setUser(freshUser);
+            if (authSeqRef.current === seq) {
+              setUser(freshUser);
+            }
           } catch (err) {
-            if (err.status === 401 || err.status === 403) {
-              setUser(null);
-              setAuthError(parseAuthError(err));
+            if (authSeqRef.current === seq) {
+              if (err.status === 401 || err.status === 403) {
+                setUser(null);
+                setAuthError(parseAuthError(err));
+              }
             }
           }
         }
@@ -202,22 +235,31 @@ export function AuthProvider({ children }) {
    * Authenticates with Google ID token and creates an authoritative session
    */
   const login = useCallback(async (idToken) => {
+    const seq = ++authSeqRef.current;
     setLoading(true);
     setAuthError(null);
     try {
       await loginWithGoogle(idToken);
       const raw = await fetchCurrentUser();
       const currentUser = raw?.user || raw;
-      setUser(currentUser);
-      setAuthError(null);
+      if (authSeqRef.current === seq) {
+        setUser(currentUser);
+        setAuthError(null);
+        setSessionPending(false);
+      }
       return currentUser;
     } catch (err) {
-      setUser(null);
-      const parsed = parseAuthError(err);
-      setAuthError(parsed);
-      throw parsed;
+      if (authSeqRef.current === seq) {
+        setUser(null);
+        const parsed = parseAuthError(err);
+        setAuthError(parsed);
+        throw parsed;
+      }
     } finally {
-      setLoading(false);
+      if (authSeqRef.current === seq) {
+        setSessionPending(false);
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -225,21 +267,26 @@ export function AuthProvider({ children }) {
    * Revokes session on backend and clears local user state
    */
   const logout = useCallback(async () => {
+    const seq = ++authSeqRef.current;
     setLoading(true);
     try {
       await logoutUser();
     } catch (err) {
       console.warn('Backend logout encountered error, clearing local state:', err);
     } finally {
-      setUser(null);
-      setAuthError(null);
-      setLoading(false);
+      if (authSeqRef.current === seq) {
+        setUser(null);
+        setAuthError(null);
+        setSessionPending(false);
+        setLoading(false);
+      }
     }
   }, []);
 
   const value = {
     user,
     loading,
+    sessionPending,
     isAuthenticated: Boolean(user && user.status === 'ACTIVE'),
     authError,
     clearAuthError,
