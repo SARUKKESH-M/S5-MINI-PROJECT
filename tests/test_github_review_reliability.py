@@ -23,10 +23,13 @@ if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import base64
 from backend.github.client import GitHubClient
 from backend.github.models import GitHubChangedFile, GitHubPullRequest, GitHubPullRequestSnapshot
 from backend.github.commenter import (
     COMMENT_MARKER,
+    COMMENT_HEAD_SHA_PREFIX,
+    extract_comment_commit_sha,
     INLINE_COMMENT_MARKER_PREFIX,
     INLINE_COMMENT_MARKER_SUFFIX,
     REVIEW_MARKER_PREFIX,
@@ -50,7 +53,7 @@ from backend.github.publisher import (
     format_commit_status_from_report,
     publish_step_6o_report_status
 )
-from backend.github.orchestrator import orchestrate_webhook_event
+from backend.github.orchestrator import orchestrate_webhook_event, _generate_pr_analysis_report
 from backend.github.exceptions import (
     GitHubAPIError,
     GitHubAuthenticationError,
@@ -759,3 +762,521 @@ def test_39_existing_inline_review_comment_structure_intact():
     assert INLINE_COMMENT_MARKER_PREFIX in comment
     assert "[CRITICAL]" in comment
     assert "`CWE-89`" in comment
+
+
+# =============================================================================
+# PHASE 3B FUNCTIONAL & RELIABILITY REGRESSION TESTS (40-53)
+# =============================================================================
+
+def test_40_javascript_pr_diff_triggers_analysis_and_detects_dom_xss(monkeypatch):
+    """40. Verifies JavaScript PR diff invokes JS AST security analysis and reports DOM XSS."""
+    js_code = (
+        "function updateContent(userHtml) {\n"
+        "    const container = document.getElementById('content');\n"
+        "    container.innerHTML = userHtml;\n"
+        "}\n"
+    )
+    encoded_content = base64.b64encode(js_code.encode("utf-8")).decode("utf-8")
+    js_diff = (
+        "@@ -1,3 +1,4 @@\n"
+        " function updateContent(userHtml) {\n"
+        "     const container = document.getElementById('content');\n"
+        "+    container.innerHTML = userHtml;\n"
+        " }\n"
+    )
+    changed_files = [
+        {
+            "filename": "frontend/src/viewer.js",
+            "status": "modified",
+            "patch": js_diff
+        }
+    ]
+    client = GitHubClient(token="test_tok")
+
+    def mock_request(self_client, method, url, **kwargs):
+        if "/contents/frontend/src/viewer.js" in str(url):
+            return httpx.Response(200, json={"content": encoded_content})
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(httpx.Client, "request", mock_request)
+
+    report = _generate_pr_analysis_report(
+        owner="test-owner",
+        repository="test-repo",
+        pr_number=10,
+        head_sha=VALID_HEAD_SHA,
+        changed_files=changed_files,
+        client=client
+    )
+    assert report["review_status"] == "block"
+    findings = report.get("findings", [])
+    assert len(findings) >= 1
+    assert any("innerHTML" in str(f) or "CWE-79" in str(f.get("cwe")) for f in findings)
+    client.close()
+
+
+def test_41_jsx_pr_diff_triggers_analysis_and_detects_dangerously_set_inner_html(monkeypatch):
+    """41. Verifies JSX PR diff invokes analysis and reports dangerouslySetInnerHTML."""
+    jsx_code = (
+        "import React from 'react';\n"
+        "export function Preview({ htmlContent }) {\n"
+        "    return <div dangerouslySetInnerHTML={{ __html: htmlContent }} />;\n"
+        "}\n"
+    )
+    encoded_content = base64.b64encode(jsx_code.encode("utf-8")).decode("utf-8")
+    jsx_diff = (
+        "@@ -1,3 +1,4 @@\n"
+        " import React from 'react';\n"
+        " export function Preview({ htmlContent }) {\n"
+        "+    return <div dangerouslySetInnerHTML={{ __html: htmlContent }} />;\n"
+        " }\n"
+    )
+    changed_files = [
+        {
+            "filename": "frontend/src/Preview.jsx",
+            "status": "modified",
+            "patch": jsx_diff
+        }
+    ]
+    client = GitHubClient(token="test_tok")
+
+    def mock_request(self_client, method, url, **kwargs):
+        if "/contents/frontend/src/Preview.jsx" in str(url):
+            return httpx.Response(200, json={"content": encoded_content})
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(httpx.Client, "request", mock_request)
+
+    report = _generate_pr_analysis_report(
+        owner="test-owner",
+        repository="test-repo",
+        pr_number=11,
+        head_sha=VALID_HEAD_SHA,
+        changed_files=changed_files,
+        client=client
+    )
+    assert report["review_status"] == "block"
+    findings = report.get("findings", [])
+    assert len(findings) >= 1
+    assert any("dangerouslySetInnerHTML" in str(f) or "CWE-79" in str(f.get("cwe")) for f in findings)
+    client.close()
+
+
+def test_42_python_pr_analysis_remains_unchanged(monkeypatch):
+    """42. Verifies Python PR diff analysis behavior remains authoritative and unaffected."""
+    py_code = (
+        "def run_command(user_input):\n"
+        "    eval(user_input)\n"
+    )
+    encoded_content = base64.b64encode(py_code.encode("utf-8")).decode("utf-8")
+    py_diff = (
+        "@@ -1,2 +1,2 @@\n"
+        " def run_command(user_input):\n"
+        "+    eval(user_input)\n"
+    )
+    changed_files = [
+        {
+            "filename": "backend/runner.py",
+            "status": "modified",
+            "patch": py_diff
+        }
+    ]
+    client = GitHubClient(token="test_tok")
+
+    def mock_request(self_client, method, url, **kwargs):
+        if "/contents/backend/runner.py" in str(url):
+            return httpx.Response(200, json={"content": encoded_content})
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(httpx.Client, "request", mock_request)
+
+    report = _generate_pr_analysis_report(
+        owner="test-owner",
+        repository="test-repo",
+        pr_number=12,
+        head_sha=VALID_HEAD_SHA,
+        changed_files=changed_files,
+        client=client
+    )
+    assert report["review_status"] == "block"
+    findings = report.get("findings", [])
+    assert len(findings) >= 1
+    assert any("eval" in str(f).lower() for f in findings)
+    client.close()
+
+
+def test_43_pr_action_filtering_supported_actions(monkeypatch):
+    """43. Verifies opened, synchronize, reopened PR actions proceed to analysis."""
+    for action in ["opened", "synchronize", "reopened"]:
+        delivery_id = f"del_act_{action}"
+
+        def mock_req(self, method, url, **kwargs):
+            str_url = str(url)
+            if "/pulls/10" in str_url:
+                return httpx.Response(200, json={
+                    "title": "PR", "state": "open", "html_url": "url",
+                    "head": {"ref": "fix", "sha": VALID_HEAD_SHA},
+                    "base": {"ref": "main", "sha": VALID_BASE_SHA}
+                })
+            return httpx.Response(200, json=[])
+
+        monkeypatch.setattr(httpx.Client, "request", mock_req)
+
+        payload = {
+            "action": action,
+            "number": 10,
+            "pull_request": {
+                "number": 10,
+                "title": f"Test action {action}",
+                "head": {"sha": VALID_HEAD_SHA},
+                "base": {"sha": VALID_BASE_SHA}
+            },
+            "repository": {
+                "name": "test-repo",
+                "owner": {"login": "test-owner"}
+            }
+        }
+        res = orchestrate_webhook_event("pull_request", delivery_id, payload)
+        assert res["status"] in ("success", "already_analyzed")
+
+
+def test_44_pr_action_filtering_unsupported_actions_ignored(monkeypatch):
+    """44. Verifies unsupported PR actions (closed, labeled, None, malformed) are safely ignored without analysis."""
+    unsupported = ["closed", "labeled", "edited", "assigned", "unlabeled", "", None, 12345]
+    for action in unsupported:
+        delivery_id = f"del_unsup_{action}"
+        payload = {
+            "number": 10,
+            "pull_request": {
+                "number": 10,
+                "head": {"sha": VALID_HEAD_SHA},
+                "base": {"sha": VALID_BASE_SHA}
+            },
+            "repository": {
+                "name": "test-repo",
+                "owner": {"login": "test-owner"}
+            }
+        }
+        if action is not None:
+            payload["action"] = action
+
+        res = orchestrate_webhook_event("pull_request", delivery_id, payload)
+        assert res["status"] == "ignored"
+        assert res["reason"] == "unsupported_pr_action"
+
+
+def test_45_stale_comment_protection_newer_comment_not_overwritten_by_older_analysis(monkeypatch):
+    """45. Verifies older commit analysis does not overwrite an existing newer commit's security comment."""
+    sha_1 = "1" * 40
+    sha_2 = "2" * 40
+    commit_order = [sha_1, sha_2]
+
+    # Existing comment is for sha_2 (newer)
+    existing_comment_body = (
+        f"{COMMENT_MARKER}\n"
+        f"{COMMENT_HEAD_SHA_PREFIX}{sha_2} -->\n"
+        "## CodeSentinel Security Audit — ALLOW\n"
+    )
+
+    patch_called = False
+    def mock_req(self, method, url, **kwargs):
+        nonlocal patch_called
+        if method == "GET" and "/issues/10/comments" in str(url):
+            return httpx.Response(200, json=[{
+                "id": 501,
+                "body": existing_comment_body
+            }])
+        if method in ("PATCH", "POST"):
+            patch_called = True
+            return httpx.Response(200, json={"id": 501})
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(httpx.Client, "request", mock_req)
+
+    client = GitHubClient(token="test_tok")
+    report = make_report([], review_status="allow")
+
+    # Attempt to post comment for sha_1 (older)
+    res = post_pr_security_comment(
+        owner="test-owner",
+        repository="test-repo",
+        pr_number=10,
+        report=report,
+        client=client,
+        head_sha=sha_1,
+        pr_commits=commit_order
+    )
+
+    assert res["status"] == "skipped"
+    assert res["reason"] == "stale_commit_comment_preserved"
+    assert patch_called is False
+    client.close()
+
+
+def test_46_stale_comment_protection_older_comment_updated_by_newer_analysis(monkeypatch):
+    """46. Verifies newer commit analysis successfully updates an existing older commit's comment."""
+    sha_1 = "1" * 40
+    sha_2 = "2" * 40
+    commit_order = [sha_1, sha_2]
+
+    # Existing comment is for sha_1 (older)
+    existing_comment_body = (
+        f"{COMMENT_MARKER}\n"
+        f"{COMMENT_HEAD_SHA_PREFIX}{sha_1} -->\n"
+        "## CodeSentinel Security Audit — ALLOW\n"
+    )
+
+    updated_body = None
+    def mock_req(self, method, url, **kwargs):
+        nonlocal updated_body
+        if method == "GET" and "/issues/10/comments" in str(url):
+            return httpx.Response(200, json=[{
+                "id": 502,
+                "body": existing_comment_body
+            }])
+        if method == "PATCH" and "/issues/comments/502" in str(url):
+            updated_body = kwargs.get("json", {}).get("body")
+            return httpx.Response(200, json={"id": 502, "body": updated_body})
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(httpx.Client, "request", mock_req)
+
+    client = GitHubClient(token="test_tok")
+    report = make_report([], review_status="block")
+
+    # Post comment for sha_2 (newer)
+    res = post_pr_security_comment(
+        owner="test-owner",
+        repository="test-repo",
+        pr_number=10,
+        report=report,
+        client=client,
+        head_sha=sha_2,
+        pr_commits=commit_order
+    )
+
+    assert res.get("id") == 502
+    assert updated_body is not None
+    assert f"{COMMENT_HEAD_SHA_PREFIX}{sha_2} -->" in updated_body
+    client.close()
+
+
+def test_47_stale_comment_protection_legacy_comment_without_sha_safely_updated(monkeypatch):
+    """47. Verifies legacy comment without SHA marker is safely updated with the new SHA marker."""
+    sha_current = "3" * 40
+
+    # Legacy comment without SHA marker
+    legacy_body = (
+        f"{COMMENT_MARKER}\n"
+        "## CodeSentinel Security Audit — ALLOW\n"
+    )
+    assert extract_comment_commit_sha(legacy_body) is None
+
+    updated_body = None
+    def mock_req(self, method, url, **kwargs):
+        nonlocal updated_body
+        if method == "GET" and "/issues/10/comments" in str(url):
+            return httpx.Response(200, json=[{
+                "id": 503,
+                "body": legacy_body
+            }])
+        if method == "PATCH" and "/issues/comments/503" in str(url):
+            updated_body = kwargs.get("json", {}).get("body")
+            return httpx.Response(200, json={"id": 503, "body": updated_body})
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(httpx.Client, "request", mock_req)
+
+    client = GitHubClient(token="test_tok")
+    report = make_report([], review_status="allow")
+
+    res = post_pr_security_comment(
+        owner="test-owner",
+        repository="test-repo",
+        pr_number=10,
+        report=report,
+        client=client,
+        head_sha=sha_current
+    )
+
+    assert res.get("id") == 503
+    assert updated_body is not None
+    assert f"{COMMENT_HEAD_SHA_PREFIX}{sha_current} -->" in updated_body
+    client.close()
+
+
+def test_48_publication_status_accuracy_complete_success(monkeypatch):
+    """48. Verifies orchestrator returns status: success when all publications succeed."""
+    def mock_req(self, method, url, **kwargs):
+        str_url = str(url)
+        if "/pulls/10" in str_url:
+            return httpx.Response(200, json={
+                "title": "PR", "state": "open", "html_url": "url",
+                "head": {"ref": "fix", "sha": VALID_HEAD_SHA},
+                "base": {"ref": "main", "sha": VALID_BASE_SHA}
+            })
+        if "/check-runs" in str_url or "/statuses" in str_url:
+            return httpx.Response(201, json={"id": 100})
+        if "/comments" in str_url:
+            return httpx.Response(201, json={"id": 200})
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(httpx.Client, "request", mock_req)
+
+    payload = {
+        "action": "opened",
+        "number": 10,
+        "pull_request": {
+            "number": 10,
+            "head": {"sha": VALID_HEAD_SHA},
+            "base": {"sha": VALID_BASE_SHA}
+        },
+        "repository": {
+            "name": "test-repo",
+            "owner": {"login": "test-owner"}
+        }
+    }
+    res = orchestrate_webhook_event("pull_request", "del_pub_succ_01", payload)
+    assert res["status"] == "success"
+    assert "reason" not in res or res.get("reason") is None
+
+
+def test_49_publication_status_accuracy_partial_success_check_runs_fail(monkeypatch):
+    """49. Verifies orchestrator returns status: partial_success when check-run publication fails but comment succeeds."""
+    def mock_req(self, method, url, **kwargs):
+        str_url = str(url)
+        if "/pulls/10" in str_url and method == "GET":
+            return httpx.Response(200, json={
+                "title": "PR", "state": "open", "html_url": "url",
+                "head": {"ref": "fix", "sha": VALID_HEAD_SHA},
+                "base": {"ref": "main", "sha": VALID_BASE_SHA}
+            })
+        if "/check-runs" in str_url:
+            return httpx.Response(500, json={"message": "Check Runs Server Error"})
+        if "/comments" in str_url:
+            return httpx.Response(201, json={"id": 200})
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(httpx.Client, "request", mock_req)
+
+    payload = {
+        "action": "opened",
+        "number": 10,
+        "pull_request": {
+            "number": 10,
+            "head": {"sha": VALID_HEAD_SHA},
+            "base": {"sha": VALID_BASE_SHA}
+        },
+        "repository": {
+            "name": "test-repo",
+            "owner": {"login": "test-owner"}
+        }
+    }
+    res = orchestrate_webhook_event("pull_request", "del_pub_part_01", payload)
+    assert res["status"] == "partial_success"
+    assert res["reason"] == "partial_publication_failure"
+    assert "review_status" in res
+
+
+def test_50_publication_status_accuracy_publication_failed(monkeypatch):
+    """50. Verifies orchestrator returns status: publication_failed when all publications fail."""
+    def mock_req(self, method, url, **kwargs):
+        str_url = str(url)
+        if "/pulls/10" in str_url and method == "GET":
+            return httpx.Response(200, json={
+                "title": "PR", "state": "open", "html_url": "url",
+                "head": {"ref": "fix", "sha": VALID_HEAD_SHA},
+                "base": {"ref": "main", "sha": VALID_BASE_SHA}
+            })
+        if "/check-runs" in str_url:
+            return httpx.Response(500, json={"message": "Check Runs Error"})
+        if "/statuses" in str_url:
+            return httpx.Response(500, json={"message": "Statuses Error"})
+        if "/comments" in str_url:
+            return httpx.Response(500, json={"message": "Comments Error"})
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(httpx.Client, "request", mock_req)
+
+    payload = {
+        "action": "opened",
+        "number": 10,
+        "pull_request": {
+            "number": 10,
+            "head": {"sha": VALID_HEAD_SHA},
+            "base": {"sha": VALID_BASE_SHA}
+        },
+        "repository": {
+            "name": "test-repo",
+            "owner": {"login": "test-owner"}
+        }
+    }
+    res = orchestrate_webhook_event("pull_request", "del_pub_fail_01", payload)
+    assert res["status"] == "publication_failed"
+    assert res["reason"] == "publication_failed"
+    assert "review_status" in res
+
+
+def test_51_github_client_rate_limit_bounded_retry_on_429(monkeypatch):
+    """51. Verifies GitHubClient safely retries publication on 429 when allow_retry_on_rate_limit=True."""
+    call_count = 0
+    sleeps = []
+
+    def mock_req(self, method, url, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return httpx.Response(429, headers={"Retry-After": "1"}, json={"message": "rate limit"})
+        return httpx.Response(201, json={"id": 100})
+
+    monkeypatch.setattr(httpx.Client, "request", mock_req)
+
+    client = GitHubClient(token="test_tok", sleep_func=lambda s: sleeps.append(s))
+    res = client.request("POST", "/repos/owner/repo/check-runs", json_data={"name": "test"}, allow_retry_on_rate_limit=True)
+    assert res.get("id") == 100
+    assert call_count == 2
+    assert len(sleeps) == 1
+    assert sleeps[0] == 1.0
+    client.close()
+
+
+def test_52_github_client_exhausted_retries_raises_rate_limit_error(monkeypatch):
+    """52. Verifies exhausted 429 retries raise GitHubRateLimitError."""
+    call_count = 0
+
+    def mock_req(self, method, url, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(429, headers={"Retry-After": "1"}, json={"message": "rate limit"})
+
+    monkeypatch.setattr(httpx.Client, "request", mock_req)
+
+    client = GitHubClient(token="test_tok", max_retries=2, sleep_func=lambda s: None)
+    with pytest.raises(GitHubRateLimitError):
+        client.request("POST", "/repos/owner/repo/statuses/sha", json_data={"state": "success"}, allow_retry_on_rate_limit=True)
+
+    assert call_count == 3  # initial attempt + 2 retries
+    client.close()
+
+
+def test_53_github_client_no_retry_on_post_network_timeout(monkeypatch):
+    """53. Verifies non-idempotent POST requests do not retry ambiguous network timeouts."""
+    call_count = 0
+
+    def mock_req(self, method, url, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise httpx.ReadTimeout("Connection timed out after partial transmission")
+
+    monkeypatch.setattr(httpx.Client, "request", mock_req)
+
+    client = GitHubClient(token="test_tok", max_retries=3)
+    with pytest.raises(GitHubAPIError) as exc_info:
+        client.request("POST", "/repos/owner/repo/issues/10/comments", json_data={"body": "test"}, allow_retry_on_rate_limit=True)
+
+    assert exc_info.value.status_code == 504
+    assert isinstance(exc_info.value.__cause__, httpx.ReadTimeout)
+
+    # Must NOT retry network timeouts on POST
+    assert call_count == 1
+    client.close()

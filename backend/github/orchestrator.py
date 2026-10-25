@@ -30,6 +30,10 @@ try:
     from backend.analysis.finding_aggregator import aggregate_and_deduplicate_findings
     from backend.analysis.scope import should_exclude_path
     from ast_engine.security_analyzer import analyze_security_structure
+    try:
+        from ast_engine.javascript_security_analyzer import analyze_javascript_security_structure
+    except ImportError:
+        analyze_javascript_security_structure = None
     from backend.github.webhook import (
         claim_webhook_delivery,
         release_webhook_delivery,
@@ -57,6 +61,10 @@ except ImportError:
     from analysis.finding_aggregator import aggregate_and_deduplicate_findings
     from analysis.scope import should_exclude_path
     from ast_engine.security_analyzer import analyze_security_structure
+    try:
+        from ast_engine.javascript_security_analyzer import analyze_javascript_security_structure
+    except ImportError:
+        analyze_javascript_security_structure = None
     try:
         from github.webhook import (
             claim_webhook_delivery,
@@ -320,6 +328,20 @@ def _generate_pr_analysis_report(
                     file_path=filename
                 )
                 findings.extend(scoped_findings)
+            elif is_js and analyze_javascript_security_structure is not None:
+                # 3. Execute deterministic JS AST security analysis on full source
+                sec_data = analyze_javascript_security_structure(source_code, file_path=filename)
+                raw_evidence = sec_data.get("security_signals", [])
+                raw_findings = generate_deterministic_findings(raw_evidence)
+
+                # 4. Scope and filter findings to changed lines/scopes
+                scoped_findings = filter_findings_to_diff_scope(
+                    findings=raw_findings,
+                    scopes=scopes,
+                    changed_lines=affected_lines,
+                    file_path=filename
+                )
+                findings.extend(scoped_findings)
 
         # Fallback: check patch diff for secrets if source code wasn't analyzed
         elif patch and isinstance(patch, str):
@@ -463,6 +485,19 @@ def orchestrate_webhook_event(
                 "reason": "delivery_already_processed"
             }
 
+        # Filter supported pull_request actions (Phase 3B)
+        raw_action = payload.get("action")
+        clean_action = str(raw_action or "").strip().lower() if isinstance(raw_action, str) else ""
+        if clean_action not in {"opened", "synchronize", "reopened"}:
+            return {
+                "status": "ignored",
+                "event": "pull_request",
+                "action": clean_action,
+                "delivery": delivery_id,
+                "delivery_id": delivery_id,
+                "reason": "unsupported_pr_action"
+            }
+
         # 2. Check commit-level idempotency and reserve commit analysis (Phase 33C)
         store = _get_analysis_store(db_path=db_path)
 
@@ -582,7 +617,8 @@ def orchestrate_webhook_event(
                     repository=clean_repo,
                     pr_number=clean_pr_num,
                     report=report,
-                    client=api_client
+                    client=api_client,
+                    head_sha=clean_head_sha
                 )
             except Exception as comment_err:
                 comment_res = {
@@ -629,8 +665,35 @@ def orchestrate_webhook_event(
                 except Exception:
                     slack_res = {"status": "failed", "reason": "unexpected_error"}
 
-            return {
-                "status": "success",
+            # Determine orchestration publication status (Phase 3B)
+            status_pub_failed = (
+                isinstance(status_pub_res, dict)
+                and status_pub_res.get("status") == "failed"
+            )
+
+            comment_pub_failed = (
+                isinstance(comment_res, dict)
+                and (
+                    comment_res.get("status") == "failed"
+                    or (
+                        comment_res.get("status") == "skipped"
+                        and comment_res.get("reason") != "stale_commit_comment_preserved"
+                    )
+                )
+            )
+
+            if status_pub_failed and comment_pub_failed:
+                root_status = "publication_failed"
+                status_reason = "publication_failed"
+            elif status_pub_failed or comment_pub_failed:
+                root_status = "partial_success"
+                status_reason = "partial_publication_failure"
+            else:
+                root_status = "success"
+                status_reason = None
+
+            result = {
+                "status": root_status,
                 "event": "pull_request",
                 "delivery": delivery_id,
                 "delivery_id": delivery_id,
@@ -646,6 +709,9 @@ def orchestrate_webhook_event(
                 "inline_comments": inline_comment_res,
                 "slack_notification": slack_res
             }
+            if status_reason:
+                result["reason"] = status_reason
+            return result
         except Exception:
             release_webhook_delivery(delivery_id, db_path=db_path)
             release_pr_commit_reservation(clean_owner, clean_repo, clean_pr_num, clean_head_sha, db_path=db_path)

@@ -59,6 +59,8 @@ DEFAULT_PAGINATION_PER_PAGE = 100
 
 
 COMMENT_MARKER = "<!-- codesentinel-security-analysis -->"
+COMMENT_HEAD_SHA_PREFIX = "<!-- codesentinel-head-sha:"
+COMMENT_HEAD_SHA_SUFFIX = " -->"
 
 DECISION_TO_COMMENT_LABEL = {
     "allow": "PASSED / Safe to Merge",
@@ -73,11 +75,27 @@ DECISION_TO_NEXT_ACTION = {
 }
 
 
+def extract_comment_commit_sha(comment_body: str) -> Optional[str]:
+    """Extracts head commit SHA from a CodeSentinel PR comment if present."""
+    if not comment_body or COMMENT_HEAD_SHA_PREFIX not in comment_body:
+        return None
+    try:
+        parts = comment_body.split(COMMENT_HEAD_SHA_PREFIX, 1)
+        if len(parts) > 1 and COMMENT_HEAD_SHA_SUFFIX in parts[1]:
+            sha_part = parts[1].split(COMMENT_HEAD_SHA_SUFFIX, 1)[0].strip()
+            if len(sha_part) == 40:
+                return sha_part.lower()
+    except Exception:
+        pass
+    return None
+
+
 def format_pr_security_comment(
     report: Dict[str, Any],
     owner: str = "",
     repository: str = "",
-    pr_number: Optional[int] = None
+    pr_number: Optional[int] = None,
+    head_sha: Optional[str] = None
 ) -> str:
     """
     Transforms a Step 6O Production Report into a deterministic Markdown PR security comment.
@@ -87,9 +105,10 @@ def format_pr_security_comment(
         owner: Optional repository owner name.
         repository: Optional repository name.
         pr_number: Optional PR number.
+        head_sha: Optional commit SHA string to associate with the comment marker.
 
     Returns:
-        Formatted Markdown string containing the COMMENT_MARKER.
+        Formatted Markdown string containing the COMMENT_MARKER and commit SHA marker.
     """
     if not isinstance(report, dict):
         raise ValueError("Step 6O report must be a non-empty dictionary")
@@ -107,6 +126,14 @@ def format_pr_security_comment(
     total_findings = int(summary.get("total_findings", len(report.get("findings", []))))
     analyzed_files = int(summary.get("analyzed_files", 0))
 
+    clean_sha = str(
+        head_sha
+        or report.get("head_sha")
+        or (report.get("repository", {}).get("head_sha") if isinstance(report.get("repository"), dict) else "")
+        or ""
+    ).strip().lower()
+    sha_marker = f"{COMMENT_HEAD_SHA_PREFIX}{clean_sha}{COMMENT_HEAD_SHA_SUFFIX}\n" if clean_sha and len(clean_sha) == 40 else ""
+
     repo_info = ""
     if owner and repository:
         repo_info = f" for **{owner}/{repository}**"
@@ -115,6 +142,7 @@ def format_pr_security_comment(
 
     markdown = (
         f"{COMMENT_MARKER}\n"
+        f"{sha_marker}"
         f"## CodeSentinel Security Analysis{repo_info}\n\n"
         f"**Security Gate Verdict**: `{decision_label}`\n\n"
         f"### Summary Telemetry\n"
@@ -157,11 +185,14 @@ def post_pr_security_comment(
     report: Dict[str, Any],
     client: Optional[GitHubClient] = None,
     max_pages: int = DEFAULT_MAX_PAGINATION_PAGES,
-    per_page: int = DEFAULT_PAGINATION_PER_PAGE
+    per_page: int = DEFAULT_PAGINATION_PER_PAGE,
+    head_sha: Optional[str] = None,
+    pr_commits: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """
     Posts or updates a GitHub Pull Request security comment.
     Searches for an existing comment with `COMMENT_MARKER` using bounded pagination and updates it if present.
+    Enforces commit SHA freshness to prevent an older commit's analysis from overwriting a newer commit's comment.
 
     Args:
         owner: Repository owner.
@@ -171,20 +202,36 @@ def post_pr_security_comment(
         client: Optional GitHubClient instance.
         max_pages: Maximum comment pages to inspect.
         per_page: Items per page.
+        head_sha: Optional commit SHA string for the current analysis.
+        pr_commits: Optional list of commit SHAs in chronological order for stale commit detection.
 
     Returns:
-        GitHub API response dictionary for comment creation/update.
+        GitHub API response dictionary for comment creation/update, or skipped status dict.
     """
     clean_owner = validate_webhook_owner(owner)
     clean_repo = validate_webhook_repo(repository)
     clean_pr_num = validate_pr_number(pr_number)
 
+    current_sha = str(
+        head_sha
+        or report.get("head_sha")
+        or (report.get("repository", {}).get("head_sha") if isinstance(report.get("repository"), dict) else "")
+        or ""
+    ).strip().lower()
+
     api_client = client or GitHubClient()
-    comment_body = format_pr_security_comment(report, owner=clean_owner, repository=clean_repo, pr_number=clean_pr_num)
+    comment_body = format_pr_security_comment(
+        report,
+        owner=clean_owner,
+        repository=clean_repo,
+        pr_number=clean_pr_num,
+        head_sha=current_sha if len(current_sha) == 40 else None
+    )
 
     # 1. Search for existing comments on the PR/issue with bounded pagination
     list_endpoint = f"/repos/{clean_owner}/{clean_repo}/issues/{clean_pr_num}/comments"
     existing_comment_id = None
+    existing_comment_body = ""
     page = 1
 
     while page <= max_pages:
@@ -199,6 +246,7 @@ def post_pr_security_comment(
         for c in comments_res:
             if isinstance(c, dict) and COMMENT_MARKER in str(c.get("body", "")):
                 existing_comment_id = c.get("id")
+                existing_comment_body = str(c.get("body", ""))
                 break
 
         if existing_comment_id is not None or len(comments_res) < per_page:
@@ -206,13 +254,38 @@ def post_pr_security_comment(
 
         page += 1
 
-    # 2. Update existing comment or post new comment
+    # 2. Check commit SHA freshness if updating an existing comment with a known SHA marker
     if existing_comment_id is not None:
+        existing_sha = extract_comment_commit_sha(existing_comment_body)
+        if existing_sha and current_sha and len(current_sha) == 40 and existing_sha != current_sha:
+            # Query PR commits in chronological order to determine ancestry
+            commit_order = pr_commits
+            if commit_order is None and api_client is not None:
+                try:
+                    commits_res = api_client.get(f"/repos/{clean_owner}/{clean_repo}/pulls/{clean_pr_num}/commits")
+                    if isinstance(commits_res, list):
+                        commit_order = [str(item.get("sha") or "").strip().lower() for item in commits_res if isinstance(item, dict)]
+                except Exception:
+                    commit_order = None
+
+            if commit_order and existing_sha in commit_order and current_sha in commit_order:
+                existing_idx = commit_order.index(existing_sha)
+                current_idx = commit_order.index(current_sha)
+                if current_idx < existing_idx:
+                    # Current analysis is strictly older than existing comment; preserve newer comment
+                    return {
+                        "status": "skipped",
+                        "reason": "stale_commit_comment_preserved",
+                        "comment_id": existing_comment_id,
+                        "existing_head_sha": existing_sha,
+                        "current_head_sha": current_sha
+                    }
+
         update_endpoint = f"/repos/{clean_owner}/{clean_repo}/issues/comments/{existing_comment_id}"
-        return api_client.request("PATCH", update_endpoint, json_data={"body": comment_body})
+        return api_client.request("PATCH", update_endpoint, json_data={"body": comment_body}, allow_retry_on_rate_limit=True)
     else:
         post_endpoint = f"/repos/{clean_owner}/{clean_repo}/issues/{clean_pr_num}/comments"
-        return api_client.request("POST", post_endpoint, json_data={"body": comment_body})
+        return api_client.request("POST", post_endpoint, json_data={"body": comment_body}, allow_retry_on_rate_limit=True)
 
 
 
@@ -704,7 +777,12 @@ def post_pr_inline_review_comments(
                 "comments": []
             }
             try:
-                res = api_client.request("POST", review_endpoint, json_data=batch_payload)
+                res = api_client.request(
+                    "POST",
+                    review_endpoint,
+                    json_data=batch_payload,
+                    allow_retry_on_rate_limit=True,
+                )
                 review_id = res.get("id") if isinstance(res, dict) else None
                 return {
                     "status": "success",
@@ -787,7 +865,12 @@ def post_pr_inline_review_comments(
     }
 
     try:
-        res = api_client.request("POST", review_endpoint, json_data=batch_payload)
+        res = api_client.request(
+            "POST",
+            review_endpoint,
+            json_data=batch_payload,
+            allow_retry_on_rate_limit=True,
+        )
         review_id = res.get("id") if isinstance(res, dict) else None
         return {
             "status": "success",
@@ -820,7 +903,12 @@ def post_pr_inline_review_comments(
                     "body": format_inline_finding_comment(item["finding"], item["fingerprint"])
                 }
                 try:
-                    api_client.request("POST", individual_endpoint, json_data=indiv_payload)
+                    api_client.request(
+                        "POST",
+                        individual_endpoint,
+                        json_data=indiv_payload,
+                        allow_retry_on_rate_limit=True,
+                    )
                     posted_count += 1
                     posted_fps.append(item["fingerprint"])
                 except Exception:

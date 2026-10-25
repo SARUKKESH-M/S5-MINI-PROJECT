@@ -231,7 +231,7 @@ def create_check_run(
 
     api_client = client or GitHubClient()
     endpoint = f"/repos/{clean_owner}/{clean_repo}/check-runs"
-    return api_client.request("POST", endpoint, json_data=payload)
+    return api_client.request("POST", endpoint, json_data=payload, allow_retry_on_rate_limit=True)
 
 
 def update_check_run(
@@ -283,7 +283,7 @@ def update_check_run(
 
     api_client = client or GitHubClient()
     endpoint = f"/repos/{clean_owner}/{clean_repo}/check-runs/{clean_check_id}"
-    return api_client.request("PATCH", endpoint, json_data=payload)
+    return api_client.request("PATCH", endpoint, json_data=payload, allow_retry_on_rate_limit=True)
 
 
 def create_commit_status(
@@ -336,7 +336,7 @@ def create_commit_status(
 
     api_client = client or GitHubClient()
     endpoint = f"/repos/{clean_owner}/{clean_repo}/statuses/{clean_sha}"
-    return api_client.request("POST", endpoint, json_data=payload)
+    return api_client.request("POST", endpoint, json_data=payload, allow_retry_on_rate_limit=True)
 
 
 def publish_step_6o_report_status(

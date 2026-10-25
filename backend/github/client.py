@@ -175,7 +175,8 @@ class GitHubClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         json_data: Optional[Dict[str, Any]] = None,
-        allow_retry: Optional[bool] = None
+        allow_retry: Optional[bool] = None,
+        allow_retry_on_rate_limit: bool = False
     ) -> Dict[str, Any]:
         """
         Executes an HTTP request against GitHub REST API with connection reuse and safe error mapping.
@@ -186,6 +187,7 @@ class GitHubClient:
             params: Optional query parameters
             json_data: Optional JSON body payload
             allow_retry: Explicit retry override. Defaults to True for GET/HEAD, False for mutations.
+            allow_retry_on_rate_limit: Permits bounded retries strictly on explicit 429/403 rate limits.
 
         Returns:
             Parsed JSON response dictionary or status indicator.
@@ -230,7 +232,10 @@ class GitHubClient:
                         return {"status": "success", "status_code": status_code}
 
                 # Check if eligible for retry
-                if can_retry and attempt < attempts_limit and self._is_retryable_status(status_code, resp):
+                is_rate_limit = (status_code in (429, 403) and self._is_retryable_status(status_code, resp))
+                eligible_for_retry = (can_retry and self._is_retryable_status(status_code, resp)) or (allow_retry_on_rate_limit and is_rate_limit)
+
+                if eligible_for_retry and attempt < self.max_retries:
                     delay = self._calculate_retry_delay(resp, attempt)
                     if delay > 0:
                         self._sleep_func(delay)
