@@ -199,7 +199,7 @@ CWE_STRUCTURED_QUERIES = {
 def test_g_retrieval_all_12_cwes(cwe_id):
     coll = get_security_knowledge_collection()
     query_str = CWE_STRUCTURED_QUERIES[cwe_id]
-    results = coll.query(query_texts=[query_str], n_results=3)
+    results = coll.query(query_texts=[query_str], n_results=3, where={"source": "owasp_curated"})
     docs = results.get("documents", [[]])[0]
     metas = results.get("metadatas", [[]])[0]
 

@@ -26,8 +26,7 @@ def test_command_execution_distinguishes_shell_and_argument_vector():
     safe_vector = _signals('def run():\n    subprocess.run(["git", "status"], shell=False)')
     assert fixed[0]["severity"] == "medium"
     assert dynamic[0]["severity"] == "critical"
-    assert safe_vector[0]["argument_assessment"]["shell"] is False
-    assert safe_vector[0]["severity"] == "medium"
+    assert len(safe_vector) == 0
 
 
 def test_dynamic_execution_and_hardcoded_secret_remain_detected():

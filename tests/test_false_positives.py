@@ -1112,3 +1112,187 @@ def test_client_cannot_arbitrarily_control_fingerprints_or_status(temp_db, sampl
     assert data["suppression"]["finding_fingerprint_v2"] != "client_crafted_v2"
     assert len(data["suppression"]["finding_fingerprint_v2"]) == 32
 
+
+# ============================================================================
+# 16. Static Security Analysis Accuracy & False-Positive Regression Tests (Phase 2B)
+# ============================================================================
+
+from ast_engine.security_analyzer import analyze_security_structure
+from backend.analysis.deterministic_findings import generate_deterministic_findings
+
+
+def _extract_signals(source: str, file_path: str = "app.py"):
+    res = analyze_security_structure(source, file_path=file_path)
+    return res["security_signals"]
+
+
+def _extract_findings(source: str, file_path: str = "app.py"):
+    signals = _extract_signals(source, file_path=file_path)
+    return generate_deterministic_findings(signals)
+
+
+# --- Fix A: Safe Subprocess Argument Vectors ---
+
+def test_fp_subprocess_literal_argument_vector_shell_false_is_clean():
+    """Verify safe literal argument vector with shell=False produces zero findings."""
+    source = """
+import subprocess
+
+def run_git_status():
+    return subprocess.run(["git", "status"], shell=False, check=True)
+"""
+    signals = _extract_signals(source)
+    cmd_signals = [s for s in signals if s["category"] == "command_execution"]
+    assert len(cmd_signals) == 0
+
+    findings = _extract_findings(source)
+    cmd_findings = [f for f in findings if f["category"] == "Injection" and "Command" in f["title"]]
+    assert len(cmd_findings) == 0
+
+
+def test_fp_subprocess_tainted_argument_vector_element_is_critical():
+    """Verify tainted input inside an argument vector produces a critical finding with trace."""
+    source = """
+import sys, subprocess
+
+def run_custom_branch():
+    branch = sys.argv[1]
+    subprocess.run(["git", "checkout", branch], shell=False)
+"""
+    signals = _extract_signals(source)
+    cmd_signals = [s for s in signals if s["category"] == "command_execution"]
+    assert len(cmd_signals) == 1
+    assert cmd_signals[0]["severity"] == "critical"
+    assert cmd_signals[0]["confidence"] == "high"
+    assessment = cmd_signals[0].get("argument_assessment", {})
+    assert assessment.get("taint_state") == "TAINTED"
+    assert assessment.get("taint_source") == "sys.argv"
+
+    findings = _extract_findings(source)
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "critical"
+    assert "Command Injection" in findings[0]["title"]
+
+
+def test_fp_subprocess_shell_true_tainted_is_critical():
+    """Verify tainted command with shell=True continues to produce critical finding."""
+    source = """
+import sys, subprocess
+
+def run_shell():
+    cmd = sys.argv[1]
+    subprocess.run(cmd, shell=True)
+"""
+    signals = _extract_signals(source)
+    cmd_signals = [s for s in signals if s["category"] == "command_execution"]
+    assert len(cmd_signals) == 1
+    assert cmd_signals[0]["severity"] == "critical"
+
+
+def test_fp_subprocess_dynamic_argument_vector_is_medium():
+    """Verify unverified dynamic argument in argument vector produces a medium warning."""
+    source = """
+import subprocess
+
+def run_dynamic(branch):
+    subprocess.run(["git", "checkout", branch], shell=False)
+"""
+    signals = _extract_signals(source)
+    cmd_signals = [s for s in signals if s["category"] == "command_execution"]
+    assert len(cmd_signals) == 1
+    assert cmd_signals[0]["severity"] == "medium"
+    assert "dynamic arguments" in cmd_signals[0]["message"].lower()
+
+
+# --- Fix B: Module-Level Parameterized SQL Constants ---
+
+def test_fp_sql_module_constant_parameterized_query_is_clean():
+    """Verify module-level literal SQL with parameter binding produces zero findings."""
+    source = """
+QUERY = "SELECT id, name FROM users WHERE tenant_id = ? AND role = ?"
+
+def get_users(cursor, tenant_id, role):
+    cursor.execute(QUERY, (tenant_id, role))
+"""
+    signals = _extract_signals(source)
+    sql_signals = [s for s in signals if s["category"] == "sql_injection"]
+    assert len(sql_signals) == 0
+
+    findings = _extract_findings(source)
+    sql_findings = [f for f in findings if f["category"] == "Injection" and "SQL" in f["title"]]
+    assert len(sql_findings) == 0
+
+
+def test_fp_sql_module_constant_named_parameters_is_clean():
+    """Verify module-level SQL with named parameters produces zero findings."""
+    source = """
+QUERY = "SELECT * FROM users WHERE tenant_id = :tenant_id AND role = :role"
+
+def get_users(cursor, tenant_id, role):
+    cursor.execute(QUERY, {"tenant_id": tenant_id, "role": role})
+"""
+    signals = _extract_signals(source)
+    sql_signals = [s for s in signals if s["category"] == "sql_injection"]
+    assert len(sql_signals) == 0
+
+
+def test_fp_sql_module_constant_static_unparameterized_is_clean():
+    """Verify module-level static SQL query without parameters produces zero findings."""
+    source = """
+ALL_USERS_SQL = "SELECT id, username, email FROM users ORDER BY created_at DESC"
+
+def list_all_users(cursor):
+    cursor.execute(ALL_USERS_SQL)
+"""
+    signals = _extract_signals(source)
+    sql_signals = [s for s in signals if s["category"] == "sql_injection"]
+    assert len(sql_signals) == 0
+
+
+def test_fp_sql_module_constant_fstring_tainted_is_high():
+    """Verify module-level dynamic f-string with untrusted input remains high severity."""
+    source = """
+from flask import request
+
+user_id = request.args.get("id")
+DYNAMIC_SQL = f"SELECT * FROM users WHERE id = {user_id}"
+
+def get_user(cursor):
+    cursor.execute(DYNAMIC_SQL)
+"""
+    signals = _extract_signals(source)
+    sql_signals = [s for s in signals if s["category"] == "sql_injection"]
+    assert len(sql_signals) == 1
+    assert sql_signals[0]["severity"] == "high"
+
+
+def test_fp_sql_module_constant_concatenation_is_high():
+    """Verify module-level string concatenation without parameters remains high severity."""
+    source = """
+PART1 = "SELECT * FROM users WHERE status = '"
+PART2 = "' AND active = 1"
+DYNAMIC_SQL = PART1 + "active" + PART2
+
+def get_active(cursor):
+    cursor.execute(DYNAMIC_SQL)
+"""
+    signals = _extract_signals(source)
+    sql_signals = [s for s in signals if s["category"] == "sql_injection"]
+    assert len(sql_signals) == 1
+    assert sql_signals[0]["severity"] == "high"
+
+
+def test_fp_sql_local_assignment_precedence_over_module_constant():
+    """Verify local variable assignment strictly overrides module-level constant."""
+    source = """
+QUERY = "SELECT * FROM users WHERE id = ?"
+
+def get_user(cursor, tainted_id):
+    QUERY = f"SELECT * FROM users WHERE id = {tainted_id}"
+    cursor.execute(QUERY)
+"""
+    signals = _extract_signals(source)
+    sql_signals = [s for s in signals if s["category"] == "sql_injection"]
+    assert len(sql_signals) == 1
+    assert sql_signals[0]["severity"] == "high"
+

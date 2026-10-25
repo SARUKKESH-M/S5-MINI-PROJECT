@@ -179,6 +179,8 @@ def analyze_security_structure(source_code: str, file_path: str = "") -> Dict[st
             "related_variables": related_variables, "argument_assessment": assessment or {}, "message": message,
         })
 
+    module_assignments: Dict[str, List[Tuple[Any, Any]]] = {}
+
     def inspect_module_secrets(root_node: Any) -> None:
         for stmt in root_node.children:
             if stmt.type in {"function_definition", "async_function_definition", "class_definition"}:
@@ -195,6 +197,8 @@ def analyze_security_structure(source_code: str, file_path: str = "") -> Dict[st
                 right = a.child_by_field_name("right")
                 if left is not None and right is not None and left.type == "identifier":
                     target = _text(left).strip()
+                    if target:
+                        module_assignments.setdefault(target, []).append((a, right))
                     if _secret_like(target) and right.type == "string":
                         line = a.start_point[0] + 1
                         add_signal(
@@ -313,6 +317,11 @@ def analyze_security_structure(source_code: str, file_path: str = "") -> Dict[st
                             if len(preceding) == 1:
                                 eval_node = preceding[0][1]
                                 query_kind = _expression_kind(eval_node)
+                            elif not preceding:
+                                mod_assigns = module_assignments.get(vname, [])
+                                if len(mod_assigns) == 1:
+                                    eval_node = mod_assigns[0][1]
+                                    query_kind = _expression_kind(eval_node)
 
                     parameterized = _is_parameterized_query(eval_node, arguments)
 
@@ -342,7 +351,17 @@ def analyze_security_structure(source_code: str, file_path: str = "") -> Dict[st
 
                     trace = None
                     if command_node is not None:
-                        trace = taint_engine.evaluate_sink_argument(node, command_node, local_scope_node=function_node)
+                        if command_kind == "argument_vector":
+                            for elem in command_node.named_children:
+                                elem_trace = taint_engine.evaluate_sink_argument(node, elem, local_scope_node=function_node)
+                                if elem_trace is not None and elem_trace.final_state == TaintState.TAINTED:
+                                    trace = elem_trace
+                                    break
+                                elif elem_trace is not None and elem_trace.final_state == TaintState.SANITIZED:
+                                    if trace is None:
+                                        trace = elem_trace
+                        else:
+                            trace = taint_engine.evaluate_sink_argument(node, command_node, local_scope_node=function_node)
 
                     if trace is not None and trace.final_state == TaintState.SANITIZED:
                         pass
@@ -356,12 +375,18 @@ def analyze_security_structure(source_code: str, file_path: str = "") -> Dict[st
                     else:
                         if shell_true or dynamic:
                             severity, confidence, message = "critical", "high", "Command execution uses a shell or dynamically constructed command."
+                            add_signal("command_execution_call", "command_execution", severity, confidence, target, line, _text(node), related, message,
+                                       {"command_kind": command_kind, "shell": shell_true, "dynamic_value_present": dynamic})
                         elif command_kind == "argument_vector":
-                            severity, confidence, message = "medium", "medium", "External command execution uses an argument vector; shell injection was not detected."
+                            all_literal_args = bool(command_node and all(_is_string_literal(elem) or elem.type in {"integer", "float"} for elem in command_node.named_children))
+                            if not all_literal_args:
+                                severity, confidence, message = "medium", "medium", "Command execution uses an argument vector with dynamic arguments."
+                                add_signal("command_execution_call", "command_execution", severity, confidence, target, line, _text(node), related, message,
+                                           {"command_kind": command_kind, "shell": shell_true, "dynamic_value_present": True})
                         else:
                             severity, confidence, message = "medium", "medium", "Direct command execution call detected."
-                        add_signal("command_execution_call", "command_execution", severity, confidence, target, line, _text(node), related, message,
-                                   {"command_kind": command_kind, "shell": shell_true, "dynamic_value_present": dynamic})
+                            add_signal("command_execution_call", "command_execution", severity, confidence, target, line, _text(node), related, message,
+                                       {"command_kind": command_kind, "shell": shell_true, "dynamic_value_present": dynamic})
                 elif target and target in _DYNAMIC_EXEC_NAMES:
                     expression_kind = _expression_kind(arguments[0] if arguments else None)
                     add_signal("dynamic_code_execution", "dynamic_code_execution", "critical" if expression_kind != "literal" else "high", "high", target, line, _text(node), related,
