@@ -10,9 +10,11 @@ from pydantic import BaseModel
 from backend.analysis.storage.store import AnalysisStore
 
 try:
-    from backend.app.core.auth import require_admin_user
+    from backend.app.core.auth import require_active_user, require_admin_user
+    from backend.analysis.storage.models import UserRecord
 except ImportError:
-    from app.core.auth import require_admin_user
+    from app.core.auth import require_active_user, require_admin_user
+    from analysis.storage.models import UserRecord
 
 router = APIRouter(tags=["Analysis History"])
 
@@ -29,18 +31,42 @@ def _get_store() -> AnalysisStore:
     return AnalysisStore()
 
 
+def _check_analysis_access(analysis_id: str, current_user: UserRecord, store: AnalysisStore) -> Dict[str, Any]:
+    """Retrieve analysis record and enforce that current_user has authorized access.
+
+    Raises:
+        HTTPException: HTTP 404 if record is missing, unowned, or belongs to another user.
+    """
+    record = store.get_analysis(analysis_id)
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Analysis '{analysis_id}' not found",
+        )
+    if not current_user.is_admin():
+        record_user_id = record.get("user_id")
+        if not record_user_id or record_user_id != current_user.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Analysis '{analysis_id}' not found",
+            )
+    return record
+
+
 @router.get("/analyses")
 def list_analyses_endpoint(
     limit: Optional[int] = Query(20, description="Maximum number of items to return"),
     offset: Optional[int] = Query(0, description="Offset index for pagination"),
+    current_user: UserRecord = Depends(require_active_user),
 ):
     """Retrieve paginated list of historical security analysis summary records."""
     safe_limit = 20 if limit is None or limit <= 0 else min(100, limit)
     safe_offset = 0 if offset is None or offset < 0 else offset
 
     store = _get_store()
-    analyses = store.list_analyses(limit=safe_limit, offset=safe_offset)
-    total_count = store.count_analyses()
+    user_id_filter = None if current_user.is_admin() else current_user.user_id
+    analyses = store.list_analyses(limit=safe_limit, offset=safe_offset, user_id=user_id_filter)
+    total_count = store.count_analyses(user_id=user_id_filter)
 
     return {
         "status": "success",
@@ -51,15 +77,13 @@ def list_analyses_endpoint(
 
 
 @router.get("/analyses/{analysis_id}")
-def get_analysis_endpoint(analysis_id: str):
+def get_analysis_endpoint(
+    analysis_id: str,
+    current_user: UserRecord = Depends(require_active_user),
+):
     """Retrieve a single historical analysis record including full findings."""
     store = _get_store()
-    record = store.get_analysis(analysis_id)
-    if not record:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Analysis '{analysis_id}' not found",
-        )
+    record = _check_analysis_access(analysis_id, current_user, store)
     return {
         "status": "success",
         "analysis": record,
@@ -67,15 +91,14 @@ def get_analysis_endpoint(analysis_id: str):
 
 
 @router.get("/analyses/{analysis_id}/findings")
-def get_findings_endpoint(analysis_id: str):
+def get_findings_endpoint(
+    analysis_id: str,
+    current_user: UserRecord = Depends(require_active_user),
+):
     """Retrieve list of findings associated with a specific analysis record."""
     store = _get_store()
-    findings = store.get_findings(analysis_id)
-    if findings is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Analysis '{analysis_id}' not found",
-        )
+    record = _check_analysis_access(analysis_id, current_user, store)
+    findings = record.get("findings", [])
     return {
         "status": "success",
         "analysis_id": analysis_id,
@@ -106,14 +129,16 @@ def mark_false_positive_endpoint(
     analysis_id: str,
     finding_id: str,
     payload: Optional[FalsePositiveRequest] = None,
+    current_user: UserRecord = Depends(require_active_user),
 ):
     """Mark a finding as false positive in persistent storage (idempotent)."""
     store = _get_store()
-    analysis = store.get_analysis(analysis_id)
-    if not analysis:
+    _check_analysis_access(analysis_id, current_user, store)
+
+    if not store.finding_exists_for_analysis(analysis_id, finding_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Analysis '{analysis_id}' not found",
+            detail=f"Finding '{finding_id}' not found in analysis '{analysis_id}'",
         )
 
     reason = payload.reason if payload else None
@@ -151,14 +176,19 @@ def mark_false_positive_endpoint(
 
 
 @router.get("/analyses/{analysis_id}/findings/{finding_id}/feedback")
-def get_finding_feedback_endpoint(analysis_id: str, finding_id: str):
+def get_finding_feedback_endpoint(
+    analysis_id: str,
+    finding_id: str,
+    current_user: UserRecord = Depends(require_active_user),
+):
     """Retrieve false-positive feedback record for a specific finding."""
     store = _get_store()
-    analysis = store.get_analysis(analysis_id)
-    if not analysis:
+    _check_analysis_access(analysis_id, current_user, store)
+
+    if not store.finding_exists_for_analysis(analysis_id, finding_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Analysis '{analysis_id}' not found",
+            detail=f"Finding '{finding_id}' not found in analysis '{analysis_id}'",
         )
 
     feedback = store.get_false_positive(analysis_id=analysis_id, finding_id=finding_id)
@@ -183,14 +213,19 @@ def get_finding_feedback_endpoint(analysis_id: str, finding_id: str):
 
 @router.delete("/analyses/{analysis_id}/findings/{finding_id}/false-positive")
 @router.post("/analyses/{analysis_id}/findings/{finding_id}/revoke-false-positive")
-def revoke_false_positive_endpoint(analysis_id: str, finding_id: str):
+def revoke_false_positive_endpoint(
+    analysis_id: str,
+    finding_id: str,
+    current_user: UserRecord = Depends(require_active_user),
+):
     """Revoke false-positive feedback for a finding without deleting historical audit trail."""
     store = _get_store()
-    analysis = store.get_analysis(analysis_id)
-    if not analysis:
+    _check_analysis_access(analysis_id, current_user, store)
+
+    if not store.finding_exists_for_analysis(analysis_id, finding_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Analysis '{analysis_id}' not found",
+            detail=f"Finding '{finding_id}' not found in analysis '{analysis_id}'",
         )
 
     suppression = store.revoke_false_positive(analysis_id=analysis_id, finding_id=finding_id)

@@ -3,15 +3,28 @@ FastAPI Router for CodeSentinel Repository Security Analysis API Endpoint.
 """
 
 from typing import Optional
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 try:
     from backend.analysis.repository_orchestrator import analyze_repository
+    from backend.analysis.storage.store import AnalysisStore
+    from backend.analysis.report_service import build_repository_report
+    from backend.app.core.auth import require_active_user
+    from backend.analysis.storage.models import UserRecord
 except ImportError:
     from analysis.repository_orchestrator import analyze_repository
+    from analysis.storage.store import AnalysisStore
+    from analysis.report_service import build_repository_report
+    from app.core.auth import require_active_user
+    from analysis.storage.models import UserRecord
 
 router = APIRouter(tags=["Repository Analysis"])
+
+
+def _get_store() -> AnalysisStore:
+    """Helper to obtain default AnalysisStore instance."""
+    return AnalysisStore()
 
 
 class RepositoryAnalysisRequest(BaseModel):
@@ -21,7 +34,10 @@ class RepositoryAnalysisRequest(BaseModel):
 
 
 @router.post("/repository/analyze")
-def repository_analyze_endpoint(request: RepositoryAnalysisRequest):
+def repository_analyze_endpoint(
+    request: RepositoryAnalysisRequest,
+    current_user: UserRecord = Depends(require_active_user),
+):
     """
     Executes repository-level static security analysis pipeline.
     Returns sanitized summary, repository info, and structured findings.
@@ -36,7 +52,8 @@ def repository_analyze_endpoint(request: RepositoryAnalysisRequest):
     try:
         res = analyze_repository(
             acquisition_id=request.acquisition_id,
-            query=request.query or "security analysis"
+            query=request.query or "security analysis",
+            user_id=current_user.user_id if current_user else None,
         )
         return res
     except ValueError as ve:
@@ -64,7 +81,10 @@ def repository_analyze_endpoint(request: RepositoryAnalysisRequest):
 
 
 @router.get("/repository/reports/{analysis_id}")
-def get_repository_report_endpoint(analysis_id: str):
+def get_repository_report_endpoint(
+    analysis_id: str,
+    current_user: UserRecord = Depends(require_active_user),
+):
     """
     Retrieves the complete production security report contract for a repository analysis ID.
     Returns 404 for missing records and 400 for malformed IDs.
@@ -76,20 +96,21 @@ def get_repository_report_endpoint(analysis_id: str):
             detail=f"Invalid or malformed analysis_id '{analysis_id}'"
         )
 
-    try:
-        from backend.analysis.storage.store import AnalysisStore
-        from backend.analysis.report_service import build_repository_report
-    except ImportError:
-        from analysis.storage.store import AnalysisStore
-        from analysis.report_service import build_repository_report
-
-    store = AnalysisStore()
+    store = _get_store()
     record = store.get_analysis(clean_id)
     if not record:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Analysis '{clean_id}' not found"
         )
+
+    if not current_user.is_admin():
+        record_user_id = record.get("user_id")
+        if not record_user_id or record_user_id != current_user.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Analysis '{clean_id}' not found"
+            )
 
     try:
         report = build_repository_report(record)

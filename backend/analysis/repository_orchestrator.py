@@ -51,7 +51,8 @@ def analyze_repository(
     changed_files: Optional[List[str]] = None,
     custom_exclude_patterns: Optional[List[str]] = None,
     strict_incremental: bool = False,
-    enable_cache: bool = True
+    enable_cache: bool = True,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Executes repository-level static security analysis pipeline with 6T platform capabilities.
@@ -323,12 +324,16 @@ def analyze_repository(
     metrics_collector.record_decision(report.get("review_status", "allow"))
 
     # 8. Persist repository analysis record into SQLite store
-    _safely_persist_repository_analysis(report, db_path=db_path)
+    _safely_persist_repository_analysis(report, db_path=db_path, user_id=user_id)
 
     return report
 
 
-def _safely_persist_repository_analysis(res: Dict[str, Any], db_path: Optional[str] = None) -> None:
+def _safely_persist_repository_analysis(
+    res: Dict[str, Any],
+    db_path: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> None:
     """Safely persist repository analysis record without exposing exceptions."""
     try:
         store = AnalysisStore(db_path=db_path)
@@ -340,7 +345,8 @@ def _safely_persist_repository_analysis(res: Dict[str, Any], db_path: Optional[s
             "summary": res["summary"],
             "findings": res["findings"],
             "repository": res.get("repository"),
-            "review_status": res.get("review_status", "allow")
+            "review_status": res.get("review_status", "allow"),
+            "user_id": user_id,
         }
         store.save_analysis(record_payload)
     except Exception:

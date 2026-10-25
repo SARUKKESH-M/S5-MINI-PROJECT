@@ -38,6 +38,7 @@ def analyze_source_code(
     source_code: Optional[str] = "",
     query: Optional[str] = "security analysis",
     db_path: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute complete security analysis pipeline on target source code.
 
@@ -80,6 +81,8 @@ def analyze_source_code(
             "analysis_version": "1.0",
             "finding_count": 0,
         }
+        if user_id:
+            res["user_id"] = user_id
         _safely_persist_analysis(res, db_path=db_path)
         return res
 
@@ -138,6 +141,8 @@ def analyze_source_code(
             "analysis_version": "1.0",
             "finding_count": len(aggregated["findings"]),
         }
+        if user_id:
+            res["user_id"] = user_id
 
         # Step 6J: Persist analysis result to SQLite store
         _safely_persist_analysis(res, db_path=db_path)

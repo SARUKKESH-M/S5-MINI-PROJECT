@@ -106,6 +106,12 @@ def get_current_user(request: Request) -> UserRecord:
         HTTPException: HTTP 401 if session is missing, invalid, or expired.
     """
     if not getattr(settings, "AUTH_ENFORCED", True):
+        # Strict safeguard: Never allow synthetic bypass administrator in production
+        if getattr(settings, "APP_ENV", "development").strip().lower() == "production":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication bypass is strictly prohibited in production.",
+            )
         return UserRecord(
             user_id="usr_system_bypass",
             google_sub=None,

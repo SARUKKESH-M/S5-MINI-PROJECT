@@ -289,7 +289,8 @@ class AnalysisStore:
                         created_at TEXT NOT NULL,
                         finding_count INTEGER NOT NULL,
                         summary_json TEXT NOT NULL,
-                        schema_version TEXT NOT NULL
+                        schema_version TEXT NOT NULL,
+                        user_id TEXT DEFAULT NULL
                     );
 
                     CREATE TABLE IF NOT EXISTS findings (
@@ -419,10 +420,13 @@ class AnalysisStore:
                     conn.execute("ALTER TABLE analyses ADD COLUMN base_sha TEXT DEFAULT NULL;")
                 if "author" not in analyses_cols:
                     conn.execute("ALTER TABLE analyses ADD COLUMN author TEXT DEFAULT NULL;")
+                if "user_id" not in analyses_cols:
+                    conn.execute("ALTER TABLE analyses ADD COLUMN user_id TEXT DEFAULT NULL;")
 
                 # Additive Phase 33C index for exact PR commit lookup
                 conn.executescript("""
                     CREATE INDEX IF NOT EXISTS idx_analyses_pr_commit ON analyses(owner, repository, pr_number, head_sha);
+                    CREATE INDEX IF NOT EXISTS idx_analyses_user_id ON analyses(user_id);
                 """)
 
                 # Additive Phase A3 schema migration for users
@@ -542,6 +546,9 @@ class AnalysisStore:
 
         clean_author = str(raw_author).strip()[:100] if (raw_author and isinstance(raw_author, str) and raw_author.strip()) else None
 
+        raw_user_id = analysis_result.get("user_id")
+        clean_user_id = str(raw_user_id).strip() if (raw_user_id and isinstance(raw_user_id, str) and raw_user_id.strip()) else None
+
         raw_findings = analysis_result.get("findings", [])
         if not isinstance(raw_findings, list):
             raw_findings = []
@@ -561,13 +568,13 @@ class AnalysisStore:
             conn.execute("DELETE FROM findings WHERE analysis_id = ?;", (analysis_id,))
             conn.execute("DELETE FROM analyses WHERE analysis_id = ?;", (analysis_id,))
 
-            # Insert analysis record with explicit PR identity fields
+            # Insert analysis record with explicit PR identity and ownership fields
             conn.execute(
                 """
                 INSERT INTO analyses (
                     analysis_id, status, query, created_at, finding_count, summary_json, schema_version,
-                    owner, repository, pr_number, head_sha, base_sha, author
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    owner, repository, pr_number, head_sha, base_sha, author, user_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     record["analysis_id"],
@@ -583,6 +590,7 @@ class AnalysisStore:
                     clean_head,
                     clean_base,
                     clean_author,
+                    clean_user_id,
                 ),
             )
 
@@ -784,30 +792,42 @@ class AnalysisStore:
                 res["head_sha"] = row["head_sha"]
             if "base_sha" in row_keys and row["base_sha"]:
                 res["base_sha"] = row["base_sha"]
+            if "user_id" in row_keys and row["user_id"]:
+                res["user_id"] = row["user_id"]
 
             return res
 
-    def list_analyses(self, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
-        """Retrieve paginated list of analysis records."""
+    def list_analyses(self, limit: int = 20, offset: int = 0, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Retrieve paginated list of analysis records, optionally filtered by user_id."""
         safe_limit = 20 if limit is None or int(limit) <= 0 else min(100, int(limit))
         safe_offset = 0 if offset is None or int(offset) < 0 else int(offset)
 
         with self._get_connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM analyses ORDER BY created_at DESC LIMIT ? OFFSET ?;",
-                (safe_limit, safe_offset),
-            ).fetchall()
+            if user_id is not None:
+                rows = conn.execute(
+                    "SELECT * FROM analyses WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?;",
+                    (str(user_id), safe_limit, safe_offset),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM analyses ORDER BY created_at DESC LIMIT ? OFFSET ?;",
+                    (safe_limit, safe_offset),
+                ).fetchall()
 
             results = []
             for row in rows:
-                results.append({
+                item = {
                     "analysis_id": row["analysis_id"],
                     "status": row["status"],
                     "query": row["query"],
                     "created_at": row["created_at"],
                     "finding_count": row["finding_count"],
                     "summary": json.loads(row["summary_json"]),
-                })
+                }
+                row_keys = row.keys()
+                if "user_id" in row_keys and row["user_id"]:
+                    item["user_id"] = row["user_id"]
+                results.append(item)
             return results
 
     def get_findings(self, analysis_id: str) -> Optional[List[Dict[str, Any]]]:
@@ -817,10 +837,22 @@ class AnalysisStore:
             return None
         return analysis.get("findings", [])
 
-    def count_analyses(self) -> int:
-        """Return total count of analyses stored in database."""
+    def finding_exists_for_analysis(self, analysis_id: str, finding_id: str) -> bool:
+        """Check if a specific finding belongs to the given analysis."""
         with self._get_connection() as conn:
-            row = conn.execute("SELECT COUNT(*) as cnt FROM analyses;").fetchone()
+            row = conn.execute(
+                "SELECT 1 FROM findings WHERE analysis_id = ? AND finding_id = ?;",
+                (str(analysis_id), str(finding_id)),
+            ).fetchone()
+            return bool(row)
+
+    def count_analyses(self, user_id: Optional[str] = None) -> int:
+        """Return total count of analyses stored in database, optionally filtered by user_id."""
+        with self._get_connection() as conn:
+            if user_id is not None:
+                row = conn.execute("SELECT COUNT(*) as cnt FROM analyses WHERE user_id = ?;", (str(user_id),)).fetchone()
+            else:
+                row = conn.execute("SELECT COUNT(*) as cnt FROM analyses;").fetchone()
             return row["cnt"] if row else 0
 
     def delete_analysis(self, analysis_id: str) -> bool:

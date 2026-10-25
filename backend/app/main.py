@@ -90,7 +90,11 @@ app.include_router(admin_router, dependencies=[Depends(require_admin_user)])
 
 @app.on_event("startup")
 def startup_event():
-    """Execute startup database initialization and optional root administrator seeding."""
+    """Execute startup database initialization, configuration validation, and optional root administrator seeding."""
+    is_valid, errors = settings.validate_security_configuration()
+    if not is_valid and getattr(settings, "APP_ENV", "").strip().lower() == "production":
+        raise RuntimeError(f"Invalid production security configuration: {'; '.join(errors)}")
+
     store = AnalysisStore()
     store.initialize()
     admin_email = getattr(settings, "ADMIN_INITIAL_EMAIL", None)

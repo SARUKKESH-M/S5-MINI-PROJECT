@@ -103,10 +103,14 @@ class Settings(BaseSettings):
         errors: List[str] = []
 
         # 1. Enforce debug restriction in production environment
-        if self.APP_ENV.lower() == "production" and self.DEBUG:
+        if self.APP_ENV.strip().lower() == "production" and self.DEBUG:
             errors.append("DEBUG mode must be False when APP_ENV is 'production'")
 
-        # 2. Enforce valid port range
+        # 2. Enforce authentication in production environment
+        if self.APP_ENV.strip().lower() == "production" and not self.AUTH_ENFORCED:
+            errors.append("AUTH_ENFORCED must be True when APP_ENV is 'production'")
+
+        # 3. Enforce valid port range
         if not (1 <= self.BACKEND_PORT <= 65535):
             errors.append(f"BACKEND_PORT must be between 1 and 65535, got {self.BACKEND_PORT}")
 
