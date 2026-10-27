@@ -339,6 +339,62 @@ def create_commit_status(
     return api_client.request("POST", endpoint, json_data=payload, allow_retry_on_rate_limit=True)
 
 
+def find_existing_check_run_id(
+    owner: str,
+    repository: str,
+    head_sha: str,
+    check_name: str = CHECK_RUN_NAME,
+    client: Optional[GitHubClient] = None
+) -> Optional[int]:
+    """
+    Looks up an existing Check Run on GitHub for the specified commit ref matching the exact check_name.
+
+    Returns the integer check_run_id if found, or None if none exist or query fails.
+    Strictly verifies name and commit SHA to prevent modifying unrelated or ambiguous check runs.
+    """
+    clean_owner = validate_webhook_owner(owner)
+    clean_repo = validate_webhook_repo(repository)
+    clean_sha = validate_commit_sha(head_sha)
+    api_client = client or GitHubClient()
+
+    endpoint = f"/repos/{clean_owner}/{clean_repo}/commits/{clean_sha}/check-runs"
+    params = {"check_name": check_name, "per_page": 100}
+
+    try:
+        resp = api_client.get(endpoint, params=params)
+    except Exception:
+        return None
+
+    if not isinstance(resp, dict):
+        return None
+
+    runs = resp.get("check_runs", [])
+    if not isinstance(runs, list):
+        return None
+
+    matching_runs = []
+    for r in runs:
+        if not isinstance(r, dict):
+            continue
+        # Exact name match (never match unrelated check runs)
+        if r.get("name") != check_name:
+            continue
+        # Verify head_sha if present
+        r_sha = r.get("head_sha")
+        if r_sha and str(r_sha).strip().lower() != clean_sha.lower():
+            continue
+        r_id = r.get("id")
+        if isinstance(r_id, int) and r_id > 0:
+            matching_runs.append(r)
+
+    if not matching_runs:
+        return None
+
+    # Handle multiple matches safely by selecting the latest run
+    matching_runs.sort(key=lambda x: (x.get("created_at") or "", x.get("id", 0)), reverse=True)
+    return matching_runs[0]["id"]
+
+
 def publish_step_6o_report_status(
     owner: str,
     repository: str,

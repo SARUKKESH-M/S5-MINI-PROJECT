@@ -12,7 +12,7 @@ import uuid
 try:
     from backend.github.client import GitHubClient
     from backend.github.pr_service import acquire_pull_request
-    from backend.github.publisher import publish_step_6o_report_status
+    from backend.github.publisher import publish_step_6o_report_status, find_existing_check_run_id
     from backend.github.commenter import post_pr_security_comment, post_pr_inline_review_comments
     from backend.github.validator import (
         validate_webhook_owner,
@@ -43,7 +43,7 @@ try:
 except ImportError:
     from github.client import GitHubClient
     from github.pr_service import acquire_pull_request
-    from github.publisher import publish_step_6o_report_status
+    from github.publisher import publish_step_6o_report_status, find_existing_check_run_id
     from github.commenter import post_pr_security_comment, post_pr_inline_review_comments
     from github.validator import (
         validate_webhook_owner,
@@ -498,8 +498,9 @@ def orchestrate_webhook_event(
                 "reason": "unsupported_pr_action"
             }
 
-        # 2. Check commit-level idempotency and reserve commit analysis (Phase 33C)
+        # 2. Check commit-level idempotency and reserve commit analysis (Phase 33C / 3D-2B)
         store = _get_analysis_store(db_path=db_path)
+        report = None
 
         if store is not None:
             existing_report = store.get_pr_analysis_by_commit(
@@ -509,31 +510,14 @@ def orchestrate_webhook_event(
                 head_sha=clean_head_sha
             )
             if existing_report is not None:
-                # Commit already successfully analyzed: short-circuit expensive operations
-                return {
-                    "status": "already_analyzed",
-                    "event": "pull_request",
-                    "delivery": delivery_id,
-                    "delivery_id": delivery_id,
-                    "owner": clean_owner,
-                    "repository": clean_repo,
-                    "pr_number": clean_pr_num,
-                    "head_sha": clean_head_sha,
-                    "review_status": existing_report.get("review_status", "allow"),
-                    "analysis_id": existing_report.get("analysis_id"),
-                    "reason": "commit_already_analyzed"
-                }
-
-            reserved, res_reason, res_analysis_id = store.reserve_pr_commit_analysis(
-                owner=clean_owner,
-                repository=clean_repo,
-                pr_number=clean_pr_num,
-                head_sha=clean_head_sha
-            )
-            if not reserved:
-                if res_reason == "already_completed":
-                    cached_report = store.get_analysis(res_analysis_id) if res_analysis_id else None
-                    review_status = cached_report.get("review_status", "allow") if cached_report else "allow"
+                # 1. If publication reservation is completed, retain existing already_analyzed behavior
+                reservation = store.get_pr_commit_reservation(
+                    owner=clean_owner,
+                    repository=clean_repo,
+                    pr_number=clean_pr_num,
+                    head_sha=clean_head_sha
+                )
+                if reservation and reservation.get("status") == "completed":
                     return {
                         "status": "already_analyzed",
                         "event": "pull_request",
@@ -543,55 +527,155 @@ def orchestrate_webhook_event(
                         "repository": clean_repo,
                         "pr_number": clean_pr_num,
                         "head_sha": clean_head_sha,
-                        "review_status": review_status,
-                        "analysis_id": res_analysis_id,
+                        "review_status": existing_report.get("review_status", "allow"),
+                        "analysis_id": existing_report.get("analysis_id"),
                         "reason": "commit_already_analyzed"
                     }
-                elif res_reason == "in_progress":
+
+                # 2. Publication is incomplete: safely reserve commit using atomic reservation mechanism
+                reserved, res_reason, res_analysis_id = store.reserve_pr_commit_analysis(
+                    owner=clean_owner,
+                    repository=clean_repo,
+                    pr_number=clean_pr_num,
+                    head_sha=clean_head_sha,
+                    allow_republish=True
+                )
+                if not reserved:
+                    if res_reason == "already_completed":
+                        return {
+                            "status": "already_analyzed",
+                            "event": "pull_request",
+                            "delivery": delivery_id,
+                            "delivery_id": delivery_id,
+                            "owner": clean_owner,
+                            "repository": clean_repo,
+                            "pr_number": clean_pr_num,
+                            "head_sha": clean_head_sha,
+                            "review_status": existing_report.get("review_status", "allow"),
+                            "analysis_id": existing_report.get("analysis_id"),
+                            "reason": "commit_already_analyzed"
+                        }
+                    elif res_reason == "in_progress":
+                        return {
+                            "status": "in_progress",
+                            "event": "pull_request",
+                            "delivery": delivery_id,
+                            "delivery_id": delivery_id,
+                            "owner": clean_owner,
+                            "repository": clean_repo,
+                            "pr_number": clean_pr_num,
+                            "head_sha": clean_head_sha,
+                            "reason": "analysis_in_progress"
+                        }
+
+                # 6. Verify that report's head SHA matches intended PR head
+                rep_head = existing_report.get("head_sha") or (existing_report.get("repository", {}) or {}).get("head_sha")
+                if not rep_head or str(rep_head).lower() != clean_head_sha.lower():
+                    store.release_pr_commit_reservation(clean_owner, clean_repo, clean_pr_num, clean_head_sha)
+                    release_webhook_delivery(delivery_id, db_path=db_path)
                     return {
-                        "status": "in_progress",
+                        "status": "ignored",
                         "event": "pull_request",
                         "delivery": delivery_id,
                         "delivery_id": delivery_id,
-                        "owner": clean_owner,
-                        "repository": clean_repo,
-                        "pr_number": clean_pr_num,
-                        "head_sha": clean_head_sha,
-                        "reason": "analysis_in_progress"
+                        "reason": "stale_report_head_sha_mismatch"
                     }
 
-        try:
-            # Acquire PR snapshot metadata & changed files
-            snapshot = acquire_pull_request(clean_owner, clean_repo, clean_pr_num, client=api_client)
+                # 4. Reuse persisted report without rerunning AST analysis
+                report = existing_report
 
+            else:
+                # Initial analysis path: reserve commit analysis
+                reserved, res_reason, res_analysis_id = store.reserve_pr_commit_analysis(
+                    owner=clean_owner,
+                    repository=clean_repo,
+                    pr_number=clean_pr_num,
+                    head_sha=clean_head_sha
+                )
+                if not reserved:
+                    if res_reason == "already_completed":
+                        cached_report = store.get_analysis(res_analysis_id) if res_analysis_id else None
+                        review_status = cached_report.get("review_status", "allow") if cached_report else "allow"
+                        return {
+                            "status": "already_analyzed",
+                            "event": "pull_request",
+                            "delivery": delivery_id,
+                            "delivery_id": delivery_id,
+                            "owner": clean_owner,
+                            "repository": clean_repo,
+                            "pr_number": clean_pr_num,
+                            "head_sha": clean_head_sha,
+                            "review_status": review_status,
+                            "analysis_id": res_analysis_id,
+                            "reason": "commit_already_analyzed"
+                        }
+                    elif res_reason == "in_progress":
+                        return {
+                            "status": "in_progress",
+                            "event": "pull_request",
+                            "delivery": delivery_id,
+                            "delivery_id": delivery_id,
+                            "owner": clean_owner,
+                            "repository": clean_repo,
+                            "pr_number": clean_pr_num,
+                            "head_sha": clean_head_sha,
+                            "reason": "analysis_in_progress"
+                        }
+
+        try:
             # Extract PR author for intelligence and notification
             raw_user = pr_obj.get("user", {}) if isinstance(pr_obj, dict) else {}
             pr_author = raw_user.get("login", "unknown") if isinstance(raw_user, dict) else "unknown"
 
-            # Execute CodeSentinel static security analysis pipeline to generate Step 6O Report
-            report = _generate_pr_analysis_report(
-                owner=clean_owner,
-                repository=clean_repo,
-                pr_number=clean_pr_num,
-                head_sha=clean_head_sha,
-                changed_files=snapshot.changed_files,
-                client=api_client,
-                author=pr_author if pr_author != "unknown" else None,
-                base_sha=clean_base_sha
-            )
+            if report is None:
+                # Acquire PR snapshot metadata & changed files
+                snapshot = acquire_pull_request(clean_owner, clean_repo, clean_pr_num, client=api_client)
+                changed_files = snapshot.changed_files
 
-            # Attach explicit PR identity fields to report before persistence
-            report["owner"] = clean_owner
-            report["repository_id"] = clean_repo
-            report["pr_number"] = clean_pr_num
-            report["head_sha"] = clean_head_sha
-            if clean_base_sha:
-                report["base_sha"] = clean_base_sha
-            if pr_author != "unknown":
-                report["author"] = pr_author
+                # Execute CodeSentinel static security analysis pipeline to generate Step 6O Report
+                report = _generate_pr_analysis_report(
+                    owner=clean_owner,
+                    repository=clean_repo,
+                    pr_number=clean_pr_num,
+                    head_sha=clean_head_sha,
+                    changed_files=changed_files,
+                    client=api_client,
+                    author=pr_author if pr_author != "unknown" else None,
+                    base_sha=clean_base_sha
+                )
 
-            # Safely persist PR analysis into SQLite store for developer and repository intelligence
-            _safely_persist_pr_analysis(report, db_path=db_path)
+                # Attach explicit PR identity fields to report before persistence
+                report["owner"] = clean_owner
+                report["repository_id"] = clean_repo
+                report["pr_number"] = clean_pr_num
+                report["head_sha"] = clean_head_sha
+                if clean_base_sha:
+                    report["base_sha"] = clean_base_sha
+                if pr_author != "unknown":
+                    report["author"] = pr_author
+
+                # Safely persist PR analysis into SQLite store for developer and repository intelligence
+                _safely_persist_pr_analysis(report, db_path=db_path)
+            else:
+                # Reusing existing analysis: attempt changed files acquisition for inline comments if available
+                changed_files = []
+                try:
+                    snapshot = acquire_pull_request(clean_owner, clean_repo, clean_pr_num, client=api_client)
+                    changed_files = snapshot.changed_files
+                except Exception:
+                    changed_files = []
+
+            # 7. Check Run reuse/update: look up existing CodeSentinel Check Run for ref
+            existing_check_run_id = None
+            try:
+                existing_check_run_id = find_existing_check_run_id(
+                    owner=clean_owner,
+                    repository=clean_repo,
+                    head_sha=clean_head_sha,
+                    client=api_client
+                )
+            except Exception:
+                existing_check_run_id = None
 
             # Publish GitHub Check Run & Commit Status
             status_pub_res = {}
@@ -601,6 +685,7 @@ def orchestrate_webhook_event(
                     repository=clean_repo,
                     head_sha=clean_head_sha,
                     report=report,
+                    check_run_id=existing_check_run_id,
                     client=api_client
                 )
             except Exception as pub_err:
@@ -635,7 +720,7 @@ def orchestrate_webhook_event(
                     pr_number=clean_pr_num,
                     head_sha=clean_head_sha,
                     report=report,
-                    changed_files=snapshot.changed_files,
+                    changed_files=changed_files,
                     client=api_client,
                     review_mode=review_mode
                 )

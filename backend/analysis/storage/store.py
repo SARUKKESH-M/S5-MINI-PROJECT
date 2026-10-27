@@ -1869,6 +1869,29 @@ class AnalysisStore:
 
         return self.get_analysis(analysis_id)
 
+    def get_pr_commit_reservation(
+        self,
+        owner: str,
+        repository: str,
+        pr_number: Any,
+        head_sha: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Retrieve current commit reservation record if present."""
+        try:
+            clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
+                owner, repository, pr_number, head_sha
+            )
+        except Exception:
+            return None
+
+        commit_key = f"{clean_owner.lower()}/{clean_repo.lower()}:{clean_pr}:{clean_head.lower()}"
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM pr_commit_reservations WHERE commit_key = ?;",
+                (commit_key,)
+            ).fetchone()
+            return dict(row) if row else None
+
     def reserve_pr_commit_analysis(
         self,
         owner: str,
@@ -1877,6 +1900,7 @@ class AnalysisStore:
         head_sha: str,
         ttl_seconds: int = DEFAULT_COMMIT_RESERVATION_TTL_SECONDS,
         now_iso: Optional[str] = None,
+        allow_republish: bool = False,
     ) -> Tuple[bool, str, Optional[str]]:
         """Atomically reserve execution rights for an exact PR commit analysis.
 
@@ -1922,7 +1946,16 @@ class AnalysisStore:
             ).fetchone()
 
             if existing:
-                return False, "already_completed", existing["analysis_id"]
+                if not allow_republish:
+                    return False, "already_completed", existing["analysis_id"]
+                # When allow_republish is True, only treat as already_completed
+                # if pr_commit_reservations actually has status == 'completed'.
+                res_check = conn.execute(
+                    "SELECT status, analysis_id FROM pr_commit_reservations WHERE commit_key = ?;",
+                    (commit_key,)
+                ).fetchone()
+                if res_check and res_check["status"] == "completed":
+                    return False, "already_completed", res_check["analysis_id"] or existing["analysis_id"]
 
             # 2. Check existing reservation in pr_commit_reservations
             res_row = conn.execute(
