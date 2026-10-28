@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from backend.analysis.security_gate import evaluate_security_gate
 from backend.analysis.storage.models import DEFAULT_DELIVERY_TTL_SECONDS
-from backend.analysis.storage.store import AnalysisStore
+from backend.analysis.storage.store import AnalysisStore, reset_database_initialization_cache
 from backend.app.core.config import settings
 from backend.app.main import app
 from backend.github.client import GitHubClient
@@ -48,6 +48,31 @@ from backend.github.webhook import (
 
 VALID_HEAD_SHA = "a" * 40
 VALID_BASE_SHA = "b" * 40
+
+
+@pytest.fixture(autouse=True)
+def clean_webhook_deliveries():
+    """Override global clean_webhook_deliveries so this module never connects to the shared database."""
+    yield
+
+
+@pytest.fixture(autouse=True)
+def isolate_test_database(tmp_path, monkeypatch):
+    """Ensure every test in this module operates on an isolated temporary SQLite database."""
+    reset_database_initialization_cache()
+    db_file = str(tmp_path / "test_github_resilience.db")
+    monkeypatch.setenv("CODESENTINEL_DB_PATH", db_file)
+    store = AnalysisStore(db_path=db_file)
+    store.initialize()
+    yield db_file
+    reset_database_initialization_cache()
+
+
+@pytest.fixture
+def temp_db(isolate_test_database):
+    """Provide isolated temporary database file path."""
+    return isolate_test_database
+
 
 
 def make_mock_pr_payload(delivery_id: str = "del_test_pr_001") -> Dict[str, Any]:
@@ -550,19 +575,19 @@ def test_23_malformed_payload_does_not_consume_delivery_id(monkeypatch):
     assert store.is_delivery_claimed(delivery_id) is False
 
 
-def test_24_unsupported_event_handling_remains_safe():
+def test_24_unsupported_event_handling_remains_safe(temp_db):
     """24. Verifies unsupported event types are acknowledged/ignored safely without claiming delivery."""
-    store = AnalysisStore()
+    store = AnalysisStore(db_path=temp_db)
     delivery_id = "del_unsupported_001"
 
-    res = orchestrate_webhook_event("issues", delivery_id, {"action": "opened"})
+    res = orchestrate_webhook_event("issues", delivery_id, {"action": "opened"}, db_path=temp_db)
     assert res["status"] == "ignored"
     assert res["reason"] == "unsupported_event"
     # Unsupported event does not claim delivery
     assert store.is_delivery_claimed(delivery_id) is False
 
 
-def test_25_duplicate_webhook_does_not_trigger_analysis_twice(monkeypatch):
+def test_25_duplicate_webhook_does_not_trigger_analysis_twice(monkeypatch, temp_db):
     """25. Verifies sending duplicate webhook delivery does not invoke static analysis twice."""
     analysis_invocations = 0
 
@@ -596,19 +621,19 @@ def test_25_duplicate_webhook_does_not_trigger_analysis_twice(monkeypatch):
     delivery_id = "del_pr_dedup_001"
     payload = make_mock_pr_payload(delivery_id)
 
-    res1 = orchestrate_webhook_event("pull_request", delivery_id, payload)
+    res1 = orchestrate_webhook_event("pull_request", delivery_id, payload, db_path=temp_db)
     assert res1["status"] == "success"
     assert analysis_invocations == 1
 
     # Second delivery with identical ID
-    res2 = orchestrate_webhook_event("pull_request", delivery_id, payload)
+    res2 = orchestrate_webhook_event("pull_request", delivery_id, payload, db_path=temp_db)
     assert res2["status"] == "duplicate"
     assert res2["reason"] == "delivery_already_processed"
     # Still exactly 1 analysis invocation!
     assert analysis_invocations == 1
 
 
-def test_26_duplicate_webhook_does_not_publish_duplicate_results(monkeypatch):
+def test_26_duplicate_webhook_does_not_publish_duplicate_results(monkeypatch, temp_db):
     """26. Verifies duplicate webhook delivery does not publish second Check Run or Commit Status."""
     publish_count = 0
 
@@ -635,16 +660,16 @@ def test_26_duplicate_webhook_does_not_publish_duplicate_results(monkeypatch):
     delivery_id = "del_no_dup_publish"
     payload = make_mock_pr_payload(delivery_id)
 
-    res1 = orchestrate_webhook_event("pull_request", delivery_id, payload)
+    res1 = orchestrate_webhook_event("pull_request", delivery_id, payload, db_path=temp_db)
     assert res1["status"] == "success"
     initial_publishes = publish_count
 
-    res2 = orchestrate_webhook_event("pull_request", delivery_id, payload)
+    res2 = orchestrate_webhook_event("pull_request", delivery_id, payload, db_path=temp_db)
     assert res2["status"] == "duplicate"
     assert publish_count == initial_publishes  # Zero additional publish calls
 
 
-def test_27_duplicate_webhook_does_not_send_duplicate_slack_notification(monkeypatch):
+def test_27_duplicate_webhook_does_not_send_duplicate_slack_notification(monkeypatch, temp_db):
     """27. Verifies duplicate webhook delivery does not trigger duplicate Slack alerts."""
     slack_alerts = 0
 
@@ -670,11 +695,11 @@ def test_27_duplicate_webhook_does_not_send_duplicate_slack_notification(monkeyp
     delivery_id = "del_slack_dedup"
     payload = make_mock_pr_payload(delivery_id)
 
-    res1 = orchestrate_webhook_event("pull_request", delivery_id, payload)
+    res1 = orchestrate_webhook_event("pull_request", delivery_id, payload, db_path=temp_db)
     assert res1["status"] == "success"
     assert slack_alerts == 1
 
-    res2 = orchestrate_webhook_event("pull_request", delivery_id, payload)
+    res2 = orchestrate_webhook_event("pull_request", delivery_id, payload, db_path=temp_db)
     assert res2["status"] == "duplicate"
     assert slack_alerts == 1  # No duplicate alert
 
