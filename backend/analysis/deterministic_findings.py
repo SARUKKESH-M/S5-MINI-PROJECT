@@ -22,6 +22,13 @@ _CATEGORIES = {
     "path_traversal": "File Security",
     "insecure_deserialization": "Deserialization",
     "xss": "Cross-Site Scripting",
+    # Canonical category aliases for idempotency
+    "Injection": "Injection",
+    "Code Execution": "Code Execution",
+    "Credential Management": "Credential Management",
+    "File Security": "File Security",
+    "Deserialization": "Deserialization",
+    "Cross-Site Scripting": "Cross-Site Scripting",
 }
 
 
@@ -33,14 +40,16 @@ def generate_deterministic_findings(evidence_items: List[Dict[str, Any]]) -> Lis
         evidence_id = str(evidence.get("evidence_id", ""))
         if signal_type not in _TITLES or not evidence_id:
             continue
+        line_start = evidence.get("line")
+        line_end = evidence.get("line_end") or line_start
         findings.append({
             "evidence_id": evidence_id, "title": _TITLES[signal_type],
             "description": str(evidence.get("message", "Security-relevant AST evidence detected.")),
             "severity": str(evidence.get("severity", "medium")), "confidence": str(evidence.get("confidence", "medium")),
             "category": _CATEGORIES.get(str(evidence.get("category", "")), "General Security"),
-            "file_path": str(evidence.get("file_path", "")), "line": evidence.get("line"), "source": "ast", "enriched_by": [],
+            "file_path": str(evidence.get("file_path", "")), "line": line_start, "source": "ast", "enriched_by": [],
             "recommendation": "Review this security-sensitive operation and avoid untrusted dynamic input.",
-            "evidence": [{"document_id": evidence_id, "line_start": evidence.get("line"), "line_end": evidence.get("line"),
+            "evidence": [{"document_id": evidence_id, "line_start": line_start, "line_end": line_end,
                           "signal_type": signal_type, "signal_name": str(evidence.get("call_name") or evidence.get("name") or "unknown")}],
         })
     return findings

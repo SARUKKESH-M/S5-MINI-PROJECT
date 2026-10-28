@@ -395,6 +395,20 @@ def analyze_security_structure(source_code: str, file_path: str = "") -> Dict[st
                     path_node = arguments[0] if arguments else None
                     if path_node is not None:
                         path_kind = _expression_kind(path_node)
+                        eval_node = path_node
+                        if path_node.type == "identifier":
+                            vname = _text(path_node).strip()
+                            if vname not in parameters:
+                                preceding = [a for a in local_assignments.get(vname, []) if a[0].end_byte <= node.start_byte]
+                                if len(preceding) == 1:
+                                    eval_node = preceding[0][1]
+                                    path_kind = _expression_kind(eval_node)
+                                elif not preceding:
+                                    mod_assigns = module_assignments.get(vname, [])
+                                    if len(mod_assigns) == 1:
+                                        eval_node = mod_assigns[0][1]
+                                        path_kind = _expression_kind(eval_node)
+
                         if path_kind != "literal" and path_kind != "missing":
                             if path_kind in {"string_concatenation", "f_string", "percent_formatting", "format_call"}:
                                 severity, confidence = "high", "high"
