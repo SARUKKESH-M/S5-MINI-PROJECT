@@ -78,18 +78,46 @@ def build_security_analysis_context(
             ast_collection_name=ast_collection_name,
         )
 
-        # 3. Step 6F: Ranking & Deduplication
+        # 3. Step 6F: Ranking & Deduplication across all retrieved candidates
         ranked_res = rank_and_deduplicate_context(
             hybrid_result=hybrid_res,
-            top_k=top_k,
+            top_k=MAX_CONTEXT_DOCUMENTS * 2,
         )
 
         ranked_docs = ranked_res.get("results") or []
         if not isinstance(ranked_docs, list):
             ranked_docs = []
 
-        # 4. Context Size Protection: Bound to MAX_CONTEXT_DOCUMENTS (20 max)
-        bounded_docs = ranked_docs[:MAX_CONTEXT_DOCUMENTS]
+        # 4. Deterministic Balanced Selection:
+        # Prevent high-priority AST evidence from starving relevant security knowledge.
+        ast_candidates = [d for d in ranked_docs if d.get("source_category") == "ast"]
+        knowledge_candidates = [d for d in ranked_docs if d.get("source_category") == "security_knowledge"]
+
+        # Target quota per category is bounded by top_k and half of MAX_CONTEXT_DOCUMENTS
+        category_quota = min(top_k, MAX_CONTEXT_DOCUMENTS // 2)
+
+        selected_ast = ast_candidates[:category_quota]
+        selected_knowledge = knowledge_candidates[:category_quota]
+
+        # If one category underfills its quota, allow the other to utilize remaining capacity
+        remaining_slots = MAX_CONTEXT_DOCUMENTS - (len(selected_ast) + len(selected_knowledge))
+        if remaining_slots > 0:
+            if len(ast_candidates) > len(selected_ast):
+                extra_ast = ast_candidates[len(selected_ast) : len(selected_ast) + remaining_slots]
+                selected_ast.extend(extra_ast)
+                remaining_slots -= len(extra_ast)
+            if remaining_slots > 0 and len(knowledge_candidates) > len(selected_knowledge):
+                extra_kn = knowledge_candidates[len(selected_knowledge) : len(selected_knowledge) + remaining_slots]
+                selected_knowledge.extend(extra_kn)
+
+        combined_selected = selected_ast + selected_knowledge
+        # Sort combined selection deterministically by relevance_score DESC, document_id ASC
+        combined_selected.sort(key=lambda item: (-item.get("relevance_score", 0.0), str(item.get("document_id", ""))))
+
+        # Apply strict MAX_CONTEXT_DOCUMENTS bound and reassign 1-based ranks
+        bounded_docs = combined_selected[:MAX_CONTEXT_DOCUMENTS]
+        for idx, item in enumerate(bounded_docs, start=1):
+            item["rank"] = idx
 
         security_evidence_list: List[Dict[str, Any]] = []
         code_structure_list: List[Dict[str, Any]] = []

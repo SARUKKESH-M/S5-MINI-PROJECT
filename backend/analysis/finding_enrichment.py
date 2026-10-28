@@ -25,8 +25,13 @@ SIGNAL_TOPIC_MAPPING = {
     "possible_hardcoded_secret": "credential_handling",
     "credential_propagation_to_authorization_sink": "credential_handling",
     "weak_cryptography": "weak_cryptography",
+    "weak_crypto_call": "weak_cryptography",
+    "weak_hash_call": "weak_cryptography",
+    "weak_cipher_call": "weak_cryptography",
     "insecure_deserialization": "deserialization",
+    "insecure_deserialization_call": "deserialization",
     "path_traversal": "path_traversal",
+    "path_traversal_call": "path_traversal",
     "cross_site_scripting": "xss",
     "dom_xss_call": "xss",
     "reflected_xss_call": "xss",
@@ -37,12 +42,37 @@ SIGNAL_TOPIC_MAPPING = {
     "null_pointer_dereference": "null_reference",
 }
 
+# Deterministic mapping from verified AST signal types to canonical CWE IDs
+SIGNAL_CWE_MAPPING = {
+    "unsafe_database_execution": "CWE-89",
+    "database_execution_call": "CWE-89",
+    "command_execution_call": "CWE-78",
+    "possible_hardcoded_secret": "CWE-798",
+    "credential_propagation_to_authorization_sink": "CWE-798",
+    "path_traversal_call": "CWE-22",
+    "path_traversal": "CWE-22",
+    "insecure_deserialization_call": "CWE-502",
+    "insecure_deserialization": "CWE-502",
+    "dom_xss_call": "CWE-79",
+    "reflected_xss_call": "CWE-79",
+    "cross_site_scripting": "CWE-79",
+    "weak_cryptography": "CWE-327",
+    "weak_crypto_call": "CWE-327",
+    "weak_hash_call": "CWE-327",
+    "weak_cipher_call": "CWE-327",
+    "missing_authentication": "CWE-306",
+    "cross_site_request_forgery": "CWE-352",
+    "unrestricted_file_upload": "CWE-434",
+    "sensitive_data_exposure": "CWE-200",
+    "null_pointer_dereference": "CWE-476",
+}
+
 
 def build_structured_rag_query(finding: Dict[str, Any]) -> str:
     """Build a structured, normalized RAG query from finding metadata without raw source code.
 
     Prefers structured signals:
-      - CWE identifier(s)
+      - CWE identifier(s) (explicit metadata or verified AST signal fallback)
       - Vulnerability / rule / signal type
       - Normalized security topic / category
       - Short normalized title
@@ -54,8 +84,14 @@ def build_structured_rag_query(finding: Dict[str, Any]) -> str:
 
     parts: List[str] = []
 
-    # 1. CWE identifier
+    # 1. CWE identifier: prefer explicit finding CWE, fallback to verified AST signal mapping
     cwe = finding.get("cwe") or finding.get("cwe_id")
+    if not (cwe and isinstance(cwe, str) and cwe.strip()):
+        evidence = finding.get("evidence")
+        if isinstance(evidence, list) and evidence and isinstance(evidence[0], dict):
+            sig_type = str(evidence[0].get("signal_type", "")).strip()
+            cwe = SIGNAL_CWE_MAPPING.get(sig_type)
+
     if cwe and isinstance(cwe, str) and cwe.strip():
         parts.append(cwe.strip())
 
@@ -163,7 +199,13 @@ def enrich_findings(
         retrieved_docs: List[Dict[str, Any]] = []
 
         # 1. Exact CWE Priority Lookup in Curated OWASP Knowledge (Cached per call)
+        # Prefer explicit valid finding CWE metadata when present; fallback to verified signal mapping
         exact_cwe = item.get("cwe") or item.get("cwe_id")
+        if not (exact_cwe and isinstance(exact_cwe, str) and str(exact_cwe).strip()):
+            if isinstance(orig_evidence, list) and orig_evidence and isinstance(orig_evidence[0], dict):
+                sig_type = str(orig_evidence[0].get("signal_type", "")).strip()
+                exact_cwe = SIGNAL_CWE_MAPPING.get(sig_type)
+
         if exact_cwe:
             clean_cwe_key = str(exact_cwe).strip().upper()
             if clean_cwe_key in curated_cache:
@@ -221,7 +263,7 @@ def enrich_findings(
                 if not item.get("security_guidance") and meta.get("title"):
                     item["security_guidance"] = meta.get("title")
         else:
-            item["enriched_by"] = ["rag"] if curated_match else []
+            item["enriched_by"] = []
 
         item["retrieved_knowledge"] = retrieved_docs
 
