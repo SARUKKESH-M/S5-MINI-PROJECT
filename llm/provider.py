@@ -13,6 +13,11 @@ class LLMProviderError(Exception):
     pass
 
 
+class LLMConnectionError(LLMProviderError):
+    """Raised when an LLM provider cannot establish a network connection."""
+    pass
+
+
 class LLMProvider:
     """Abstract base class for CodeSentinel LLM Security Analysis providers."""
 
@@ -209,11 +214,23 @@ def get_llm_provider(
     from llm.ollama_provider import OllamaLLMProvider
     from llm.fallback_provider import FallbackLLMProvider
 
+    ollama_timeout = float(getattr(settings, "OLLAMA_TIMEOUT", 20.0)) if settings else float(os.getenv("OLLAMA_TIMEOUT", "20.0"))
+    ollama_connect_timeout = float(getattr(settings, "OLLAMA_CONNECT_TIMEOUT", 1.0)) if settings else float(os.getenv("OLLAMA_CONNECT_TIMEOUT", "1.0"))
+    ollama_cooldown = float(getattr(settings, "OLLAMA_COOLDOWN_SECONDS", 30.0)) if settings else float(os.getenv("OLLAMA_COOLDOWN_SECONDS", "30.0"))
+
     if groq_key:
         groq_prov = GroqLLMProvider(api_key=groq_key)
-        ollama_prov = OllamaLLMProvider()
+        ollama_prov = OllamaLLMProvider(
+            timeout=ollama_timeout,
+            connect_timeout=ollama_connect_timeout,
+            cooldown_seconds=ollama_cooldown,
+        )
         return FallbackLLMProvider(providers=[groq_prov, ollama_prov, MockLLMProvider()])
 
-    ollama_prov = OllamaLLMProvider()
+    ollama_prov = OllamaLLMProvider(
+        timeout=ollama_timeout,
+        connect_timeout=ollama_connect_timeout,
+        cooldown_seconds=ollama_cooldown,
+    )
     return FallbackLLMProvider(providers=[ollama_prov, MockLLMProvider()])
 

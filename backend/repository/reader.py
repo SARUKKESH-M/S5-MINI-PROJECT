@@ -7,6 +7,7 @@ never imported, evaluated, or executed.
 """
 
 import os
+import stat
 from typing import Any, Dict
 from repository.discovery import get_language_for_extension
 
@@ -43,27 +44,34 @@ def read_source_file(file_rel_path: str, repository_root: str) -> Dict[str, Any]
     if not full_path.startswith(abs_root):
         raise ValueError(f"File path escapes repository boundary: {file_rel_path}")
 
-    if not os.path.exists(full_path) or not os.path.isfile(full_path):
-        raise ValueError(f"Source file not found: {file_rel_path}")
-
     ext = os.path.splitext(full_path)[1].lower()
     language = get_language_for_extension(ext) or "unknown"
 
-    size_bytes = os.path.getsize(full_path)
+    # Open descriptor directly to avoid redundant stat calls and eliminate TOCTOU races
+    try:
+        f = open(full_path, "rb")
+    except (FileNotFoundError, IsADirectoryError, PermissionError, OSError) as exc:
+        raise ValueError(f"Source file not found: {file_rel_path}") from exc
 
-    # Individual file size limit check
-    if size_bytes > MAX_FILE_SIZE:
-        return {
-            "path": file_rel_path.replace("\\", "/"),
-            "language": language,
-            "size_bytes": size_bytes,
-            "skipped": True,
-            "reason": "exceeds MAX_FILE_SIZE",
-            "source_code": ""
-        }
+    with f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"Source file not found: {file_rel_path}")
 
-    # Binary check and text reading
-    with open(full_path, "rb") as f:
+        size_bytes = st.st_size
+
+        # Individual file size limit check
+        if size_bytes > MAX_FILE_SIZE:
+            return {
+                "path": file_rel_path.replace("\\", "/"),
+                "language": language,
+                "size_bytes": size_bytes,
+                "skipped": True,
+                "reason": "exceeds MAX_FILE_SIZE",
+                "source_code": ""
+            }
+
+        # Binary check and text reading
         initial_chunk = f.read(4096)
         if is_binary_content(initial_chunk):
             return {

@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     GROQ_MODEL: str = "llama3-70b-8192"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "codellama"
+    OLLAMA_TIMEOUT: float = 20.0
+    OLLAMA_CONNECT_TIMEOUT: float = 1.0
+    OLLAMA_COOLDOWN_SECONDS: float = 30.0
 
     # GitHub Integration & Webhook Credentials
     GITHUB_TOKEN: Optional[str] = None

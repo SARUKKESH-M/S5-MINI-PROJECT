@@ -8,10 +8,11 @@ import json
 import logging
 import os
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 import httpx
-from llm.provider import LLMProvider, LLMProviderError
+from llm.provider import LLMProvider, LLMProviderError, LLMConnectionError
 
 try:
     from backend.app.core.security import sanitize_sensitive_text
@@ -44,6 +45,11 @@ def _verify_and_sanitize_context(context_input: Any) -> Any:
     return context_input
 
 
+_COOLDOWN_LOCK = threading.Lock()
+_LAST_CONNECT_FAILURE: float = 0.0
+DEFAULT_COOLDOWN_SECONDS: float = 30.0
+
+
 class OllamaLLMProvider(LLMProvider):
     """Local Ollama HTTP API provider for CodeSentinel security analysis and fallback."""
 
@@ -51,7 +57,9 @@ class OllamaLLMProvider(LLMProvider):
         self,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
-        timeout: float = 20.0,
+        timeout: Optional[float] = None,
+        connect_timeout: Optional[float] = None,
+        cooldown_seconds: Optional[float] = None,
     ):
         if base_url is None:
             try:
@@ -67,13 +75,60 @@ class OllamaLLMProvider(LLMProvider):
             except ImportError:
                 model = os.getenv("OLLAMA_MODEL", "codellama")
 
+        if timeout is None:
+            try:
+                from backend.app.core.config import settings
+                timeout = float(getattr(settings, "OLLAMA_TIMEOUT", 20.0))
+            except (ImportError, TypeError, ValueError):
+                timeout = float(os.getenv("OLLAMA_TIMEOUT", "20.0"))
+
+        if connect_timeout is None:
+            try:
+                from backend.app.core.config import settings
+                connect_timeout = float(getattr(settings, "OLLAMA_CONNECT_TIMEOUT", 1.0))
+            except (ImportError, TypeError, ValueError):
+                connect_timeout = float(os.getenv("OLLAMA_CONNECT_TIMEOUT", "1.0"))
+
+        if cooldown_seconds is None:
+            try:
+                from backend.app.core.config import settings
+                cooldown_seconds = float(getattr(settings, "OLLAMA_COOLDOWN_SECONDS", 30.0))
+            except (ImportError, TypeError, ValueError):
+                cooldown_seconds = float(os.getenv("OLLAMA_COOLDOWN_SECONDS", "30.0"))
+
         self.base_url = (base_url or "http://localhost:11434").rstrip("/")
         self.model = model or "codellama"
         self.timeout = float(timeout)
+        self.connect_timeout = float(connect_timeout)
+        self.cooldown_seconds = float(cooldown_seconds)
 
         self._client: Optional[httpx.Client] = None
         self._lock = threading.Lock()
         self._closed = False
+
+    def _is_in_cooldown(self, now: Optional[float] = None) -> bool:
+        """Check if Ollama is currently in a failure cooldown window."""
+        if self.cooldown_seconds <= 0.0:
+            return False
+        current = time.monotonic() if now is None else float(now)
+        with _COOLDOWN_LOCK:
+            return (current - _LAST_CONNECT_FAILURE) < self.cooldown_seconds
+
+    def _record_connect_failure(self, now: Optional[float] = None) -> None:
+        """Record connection failure timestamp to trigger subsequent fast-fail cooldown."""
+        global _LAST_CONNECT_FAILURE
+        if self.cooldown_seconds <= 0.0:
+            return
+        current = time.monotonic() if now is None else float(now)
+        with _COOLDOWN_LOCK:
+            _LAST_CONNECT_FAILURE = current
+
+    @classmethod
+    def reset_cooldown(cls) -> None:
+        """Reset the failure cooldown timestamp across all instances."""
+        global _LAST_CONNECT_FAILURE
+        with _COOLDOWN_LOCK:
+            _LAST_CONNECT_FAILURE = 0.0
 
     def _get_client(self) -> httpx.Client:
         """Lazily initialize or return the thread-safe reusable httpx.Client."""
@@ -81,7 +136,8 @@ class OllamaLLMProvider(LLMProvider):
             if self._closed:
                 raise LLMProviderError("OllamaLLMProvider instance has been closed.")
             if self._client is None or self._client.is_closed:
-                self._client = httpx.Client(timeout=self.timeout)
+                timeout_config = httpx.Timeout(self.timeout, connect=self.connect_timeout)
+                self._client = httpx.Client(timeout=timeout_config)
             return self._client
 
     def close(self) -> None:
@@ -109,6 +165,9 @@ class OllamaLLMProvider(LLMProvider):
 
     def _post_chat(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
         """Execute HTTP POST to Ollama /api/chat with format=json."""
+        if self._is_in_cooldown():
+            raise LLMConnectionError(f"Ollama daemon at {self.base_url} is unavailable (in failure cooldown).")
+
         endpoint = f"{self.base_url}/api/chat"
         headers = {
             "Content-Type": "application/json",
@@ -160,8 +219,9 @@ class OllamaLLMProvider(LLMProvider):
 
             return parsed_json
 
-        except httpx.ConnectError as exc:
-            raise LLMProviderError(f"Ollama connection refused at {self.base_url}: {exc}") from exc
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            self._record_connect_failure()
+            raise LLMConnectionError(f"Ollama connection refused at {self.base_url}: {exc}") from exc
         except httpx.TimeoutException as exc:
             raise LLMProviderError(f"Ollama request timed out after {self.timeout}s: {exc}") from exc
         except (json.JSONDecodeError, ValueError) as exc:
@@ -201,6 +261,9 @@ class OllamaLLMProvider(LLMProvider):
         if not findings:
             return []
 
+        if self._is_in_cooldown():
+            raise LLMConnectionError(f"Ollama daemon at {self.base_url} is unavailable (in failure cooldown).")
+
         try:
             from llm.explanation_contract import (
                 validate_and_sanitize_explanation,
@@ -238,6 +301,9 @@ class OllamaLLMProvider(LLMProvider):
             try:
                 raw_resp = self._post_chat(messages)
                 structured = validate_and_sanitize_explanation(raw_resp, item, provenance="ollama")
+            except LLMConnectionError:
+                # Connection failures to the daemon must propagate immediately to allow FallbackLLMProvider to switch
+                raise
             except Exception as exc:
                 logger.info("Ollama explanation failed for finding '%s' (%s). Using deterministic fallback.", orig_finding_id, exc)
                 structured = generate_deterministic_fallback_explanation(item, knowledge_doc=k_doc)
@@ -257,9 +323,17 @@ class OllamaLLMProvider(LLMProvider):
             if orig_finding_id is not None:
                 item["finding_id"] = orig_finding_id
 
+            # Accurately record provenance: never falsely label deterministic fallback as ollama_llm
             enriched_by = list(item.get("enriched_by", []))
-            if "ollama_llm" not in enriched_by:
-                enriched_by.append("ollama_llm")
+            prov = structured.get("provenance", "")
+            if prov == "ollama":
+                if "ollama_llm" not in enriched_by:
+                    enriched_by.append("ollama_llm")
+            else:
+                if "ollama_llm" in enriched_by:
+                    enriched_by.remove("ollama_llm")
+                if "deterministic_fallback" not in enriched_by:
+                    enriched_by.append("deterministic_fallback")
             item["enriched_by"] = enriched_by
             enriched.append(item)
 
