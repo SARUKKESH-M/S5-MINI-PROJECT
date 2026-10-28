@@ -36,6 +36,7 @@ def build_security_analysis_context(
     query: str,
     top_k: int = 5,
     db_path: Optional[str] = None,
+    ast_collection_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build an LLM-ready security analysis context object from RAG retrieval and ranking.
 
@@ -43,6 +44,7 @@ def build_security_analysis_context(
       query: Natural language or structural search query string.
       top_k: Max candidate documents requested per collection before context limits (default: 5).
       db_path: Optional database storage path override.
+      ast_collection_name: Optional analysis-scoped AST collection name (defaults to DEFAULT_COLLECTION_NAME).
 
     Returns:
       JSON-serializable dict containing status, query, context (sectioned documents),
@@ -73,6 +75,7 @@ def build_security_analysis_context(
             top_k_ast=top_k,
             top_k_knowledge=top_k,
             db_path=db_path,
+            ast_collection_name=ast_collection_name,
         )
 
         # 3. Step 6F: Ranking & Deduplication

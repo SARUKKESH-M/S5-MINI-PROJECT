@@ -23,6 +23,7 @@ def retrieve_hybrid_context(
     top_k_ast: int = 5,
     top_k_knowledge: int = 5,
     db_path: Optional[str] = None,
+    ast_collection_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Retrieve hybrid RAG context from both AST evidence and security knowledge collections.
 
@@ -31,6 +32,7 @@ def retrieve_hybrid_context(
       top_k_ast: Max number of AST evidence results (default: 5).
       top_k_knowledge: Max number of security knowledge results (default: 5).
       db_path: Optional database storage path override.
+      ast_collection_name: Optional analysis-scoped AST collection name (defaults to DEFAULT_COLLECTION_NAME).
 
     Returns:
       JSON-serializable dict containing status, query, ast_results, knowledge_results,
@@ -52,12 +54,14 @@ def retrieve_hybrid_context(
         ast_results: List[Dict[str, Any]] = []
         knowledge_results: List[Dict[str, Any]] = []
 
-        # 2. AST Evidence Retrieval (codesentinel_ast_knowledge)
+        target_ast_coll = ast_collection_name or DEFAULT_COLLECTION_NAME
+
+        # 2. AST Evidence Retrieval (target_ast_coll)
         if top_k_ast > 0:
             ast_retrieval = retrieve_documents(
                 query=query,
                 top_k=top_k_ast,
-                collection_name=DEFAULT_COLLECTION_NAME,
+                collection_name=target_ast_coll,
             )
             if ast_retrieval.get("status") == "success":
                 ast_results = ast_retrieval.get("results", [])

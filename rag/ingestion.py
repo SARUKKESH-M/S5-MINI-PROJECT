@@ -5,13 +5,25 @@ into the persistent ChromaDB collection created in Step 6A.
 Preserves all structural metadata while using upsert semantics for idempotency.
 """
 
+import os
+import threading
 from typing import Any, Dict, List, Optional
+from app.core.config import settings
 from rag.vector_store import (
     get_collection,
     DEFAULT_COLLECTION_NAME,
     get_security_knowledge_collection,
     SECURITY_KNOWLEDGE_COLLECTION_NAME,
 )
+
+_CURATED_INGESTED_LOCK = threading.Lock()
+_VERIFIED_KNOWLEDGE_PATHS: set = set()
+
+
+def reset_curated_knowledge_cache() -> None:
+    """Reset the verified curated knowledge in-memory cache (for isolated tests)."""
+    with _CURATED_INGESTED_LOCK:
+        _VERIFIED_KNOWLEDGE_PATHS.clear()
 
 
 def _clean_metadata_for_chroma(metadata: Dict[str, Any]) -> Dict[str, Any]:
@@ -34,12 +46,14 @@ def _clean_metadata_for_chroma(metadata: Dict[str, Any]) -> Dict[str, Any]:
 def ingest_documents(
     documents: List[Dict[str, Any]],
     collection_name: Optional[str] = None,
+    db_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Ingest a list of RAG document objects into the persistent ChromaDB vector store.
 
     Parameters:
       documents: List of document dicts, each with 'document_id', 'content', and 'metadata'.
       collection_name: Optional custom collection name; defaults to DEFAULT_COLLECTION_NAME.
+      db_path: Optional database storage path override.
 
     Returns:
       Summary dict containing status, ingested_count, and collection_name.
@@ -74,7 +88,7 @@ def ingest_documents(
             "collection_name": target_coll_name,
         }
 
-    collection = get_collection(collection_name=target_coll_name)
+    collection = get_collection(collection_name=target_coll_name, db_path=db_path)
 
     # Use upsert to guarantee idempotency and avoid duplicate ID errors
     collection.upsert(
@@ -193,6 +207,8 @@ def ensure_curated_knowledge_ingested(
     and force is False, returns existing status without redundant disk writes.
     If missing or force is True, ingests CURATED_OWASP_KNOWLEDGE deterministically and idempotently.
 
+    Thread-safe and process-cached by normalized database path.
+
     Parameters:
       db_path: Optional database storage path override.
       force: If True, re-upserts all documents regardless of current collection state.
@@ -202,6 +218,18 @@ def ensure_curated_knowledge_ingested(
     """
     from knowledge.curated_owasp import CURATED_OWASP_KNOWLEDGE
 
+    target_path = os.path.normcase(os.path.abspath(db_path or settings.CHROMA_DB_PATH))
+
+    if not force:
+        with _CURATED_INGESTED_LOCK:
+            if target_path in _VERIFIED_KNOWLEDGE_PATHS:
+                return {
+                    "status": "success",
+                    "ingested_count": 0,
+                    "collection_name": SECURITY_KNOWLEDGE_COLLECTION_NAME,
+                    "already_present": True,
+                }
+
     collection = get_security_knowledge_collection(db_path=db_path)
     canonical_sample_chunk_id = "knowledge_cwe_89_sql_injection_chunk_1"
 
@@ -209,6 +237,8 @@ def ensure_curated_knowledge_ingested(
         try:
             existing = collection.get(ids=[canonical_sample_chunk_id])
             if existing and existing.get("ids"):
+                with _CURATED_INGESTED_LOCK:
+                    _VERIFIED_KNOWLEDGE_PATHS.add(target_path)
                 return {
                     "status": "success",
                     "ingested_count": 0,
@@ -218,6 +248,11 @@ def ensure_curated_knowledge_ingested(
         except Exception:
             pass
 
-    return ingest_security_knowledge(CURATED_OWASP_KNOWLEDGE, db_path=db_path)
+    res = ingest_security_knowledge(CURATED_OWASP_KNOWLEDGE, db_path=db_path)
+    if isinstance(res, dict) and res.get("status") == "success":
+        with _CURATED_INGESTED_LOCK:
+            _VERIFIED_KNOWLEDGE_PATHS.add(target_path)
+
+    return res
 
 

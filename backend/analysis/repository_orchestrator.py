@@ -15,7 +15,11 @@ from typing import Any, Dict, List, Optional
 from ast_engine.rag_adapter import prepare_ast_documents_for_rag
 from ast_engine.evidence_normalizer import normalize_security_evidence
 from rag.ingestion import ingest_documents
-from rag.vector_store import DEFAULT_COLLECTION_NAME
+from rag.vector_store import (
+    DEFAULT_COLLECTION_NAME,
+    generate_transient_ast_collection_name,
+    delete_transient_collection,
+)
 try:
     from rag.context_builder import MAX_CONTEXT_DOCUMENTS
 except ImportError:
@@ -233,78 +237,79 @@ def analyze_repository(
     del all_ast_docs
     gc.collect()
 
-    # 7. Clear stale AST evidence & Ingest only relevant AST documents into transient RAG collection
+    # 7. Generate isolated transient AST collection name for this analysis run
+    transient_ast_collection = generate_transient_ast_collection_name(analysis_id)
+
     try:
-        from rag.vector_store import initialize_vector_store
-        v_client = initialize_vector_store()
+        # Ingest only relevant AST documents into transient RAG collection
+        if filtered_ast_docs:
+            try:
+                ingest_documents(filtered_ast_docs, collection_name=transient_ast_collection, db_path=db_path)
+            except Exception:
+                pass
+
+        # Explicitly release filtered AST documents once ingested
+        del filtered_ast_docs
+        gc.collect()
+
+        # 8. Enrich deterministic findings (Curated OWASP + RAG context + LLM explanation)
+        enriched_findings = enrich_findings(
+            raw_findings,
+            db_path=db_path,
+            ast_collection_name=transient_ast_collection,
+        )
+        valid_doc_ids = {str(item.get("evidence_id")) for item in all_security_evidence if item.get("evidence_id")}
+
+        # Step 6N: Normalize, Ground, Deduplicate & Aggregate Findings
         try:
-            v_client.delete_collection(DEFAULT_COLLECTION_NAME)
-        except Exception:
-            pass
-    except Exception:
-        pass
+            from backend.analysis.finding_normalizer import normalize_findings
+            from backend.analysis.finding_aggregator import aggregate_and_deduplicate_findings
+        except ImportError:
+            from analysis.finding_normalizer import normalize_findings
+            from analysis.finding_aggregator import aggregate_and_deduplicate_findings
 
-    if filtered_ast_docs:
-        try:
-            ingest_documents(filtered_ast_docs, collection_name=DEFAULT_COLLECTION_NAME)
-        except Exception:
-            pass
+        normalized_raw = normalize_findings(enriched_findings, valid_document_ids=valid_doc_ids)
+        agg_res = aggregate_and_deduplicate_findings(normalized_raw, file_stats=file_stats)
 
-    # Explicitly release filtered AST documents once ingested
-    del filtered_ast_docs
-    gc.collect()
+        duration_ms = (time.time() - start_time) * 1000.0
+        metrics_collector.record_duration(duration_ms)
+        metrics_collector.increment("analysis_success_total")
 
-    # 8. Enrich deterministic findings (Curated OWASP + RAG context + LLM explanation)
-    enriched_findings = enrich_findings(raw_findings, db_path=db_path)
-    valid_doc_ids = {str(item.get("evidence_id")) for item in all_security_evidence if item.get("evidence_id")}
+        # Build internal traceability metadata
+        trace_meta = build_analysis_traceability_metadata(
+            policy_name=policy.name,
+            is_incremental=is_incremental,
+            files_considered=raw_file_stats.get("files_considered", raw_file_stats.get("total_files", 0)),
+            files_analyzed=analyzed_count,
+            files_excluded=excluded_count,
+            cache_hits=cache_hits,
+            cache_misses=cache_misses,
+            duration_ms=duration_ms
+        )
 
-    # Step 6N: Normalize, Ground, Deduplicate & Aggregate Findings
-    try:
-        from backend.analysis.finding_normalizer import normalize_findings
-        from backend.analysis.finding_aggregator import aggregate_and_deduplicate_findings
-    except ImportError:
-        from analysis.finding_normalizer import normalize_findings
-        from analysis.finding_aggregator import aggregate_and_deduplicate_findings
+        res = {
+            "status": "success",
+            "analysis_id": analysis_id,
+            "repository": repo_info,
+            "summary": agg_res["summary"],
+            "findings": agg_res["findings"],
+            "analysis_version": "1.0"
+        }
 
-    normalized_raw = normalize_findings(enriched_findings, valid_document_ids=valid_doc_ids)
-    agg_res = aggregate_and_deduplicate_findings(normalized_raw, file_stats=file_stats)
+        report = build_repository_report(res)
 
-    duration_ms = (time.time() - start_time) * 1000.0
-    metrics_collector.record_duration(duration_ms)
-    metrics_collector.increment("analysis_success_total")
+        # Attach internal traceability metadata to report dictionary (does not break Step 6O contract)
+        report["traceability"] = trace_meta
 
-    # Build internal traceability metadata
-    trace_meta = build_analysis_traceability_metadata(
-        policy_name=policy.name,
-        is_incremental=is_incremental,
-        files_considered=raw_file_stats.get("files_considered", raw_file_stats.get("total_files", 0)),
-        files_analyzed=analyzed_count,
-        files_excluded=excluded_count,
-        cache_hits=cache_hits,
-        cache_misses=cache_misses,
-        duration_ms=duration_ms
-    )
+        metrics_collector.record_decision(report.get("review_status", "allow"))
 
-    res = {
-        "status": "success",
-        "analysis_id": analysis_id,
-        "repository": repo_info,
-        "summary": agg_res["summary"],
-        "findings": agg_res["findings"],
-        "analysis_version": "1.0"
-    }
+        # 8. Persist repository analysis record into SQLite store
+        _safely_persist_repository_analysis(report, db_path=db_path, user_id=user_id)
 
-    report = build_repository_report(res)
-
-    # Attach internal traceability metadata to report dictionary (does not break Step 6O contract)
-    report["traceability"] = trace_meta
-
-    metrics_collector.record_decision(report.get("review_status", "allow"))
-
-    # 8. Persist repository analysis record into SQLite store
-    _safely_persist_repository_analysis(report, db_path=db_path, user_id=user_id)
-
-    return report
+        return report
+    finally:
+        # Guarantee transient collection cleanup under all conditions
+        delete_transient_collection(transient_ast_collection, db_path=db_path)
 
 
 def _safely_persist_repository_analysis(

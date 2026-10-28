@@ -18,7 +18,13 @@ import pytest
 
 from backend.repository.acquirer import acquire_repository
 from backend.analysis.repository_orchestrator import analyze_repository
-from rag.vector_store import get_collection, DEFAULT_COLLECTION_NAME
+from rag.vector_store import (
+    get_collection,
+    initialize_vector_store,
+    generate_transient_ast_collection_name,
+    delete_transient_collection,
+    DEFAULT_COLLECTION_NAME,
+)
 
 
 @pytest.fixture
@@ -51,8 +57,28 @@ def dummy_clean_repo():
         yield tmpdir
 
 
-def test_bounded_rag_ingestion_and_scope_coverage(dummy_mixed_repo):
-    with tempfile.TemporaryDirectory() as ws_root:
+def test_bounded_rag_ingestion_and_scope_coverage(dummy_mixed_repo, monkeypatch):
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as ws_root, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as chroma_dir:
+        # Intercept delete_transient_collection to inspect the analysis-scoped AST
+        # collection contents right before it is deleted, and verify post-deletion cleanup.
+        captured_transient_ast = []
+        original_delete = delete_transient_collection
+
+        def spy_delete_transient_collection(collection_name: str, db_path=None):
+            coll = get_collection(collection_name=collection_name, db_path=db_path)
+            captured_transient_ast.append({
+                "collection_name": collection_name,
+                "data": coll.get(),
+                "count": coll.count(),
+                "db_path": db_path,
+            })
+            return original_delete(collection_name, db_path=db_path)
+
+        monkeypatch.setattr(
+            "backend.analysis.repository_orchestrator.delete_transient_collection",
+            spy_delete_transient_collection,
+        )
+
         acq = acquire_repository(
             repository_url="https://github.com/example/mixed-repo",
             local_path=dummy_mixed_repo,
@@ -60,8 +86,8 @@ def test_bounded_rag_ingestion_and_scope_coverage(dummy_mixed_repo):
         )
         acq_id = acq["acquisition"]["acquisition_id"]
 
-        # Execute repository analysis
-        res = analyze_repository(acquisition_id=acq_id, workspace_root=ws_root)
+        # Execute repository analysis with isolated ChromaDB storage
+        res = analyze_repository(acquisition_id=acq_id, workspace_root=ws_root, db_path=chroma_dir)
 
         # 1. In-scope file coverage
         summary = res["summary"]
@@ -80,10 +106,13 @@ def test_bounded_rag_ingestion_and_scope_coverage(dummy_mixed_repo):
 
         # 4. RAG collection received ONLY evidence-associated AST documents
         # The 2 clean files (helper.py and utils.py) must NOT have had their function/module docs embedded
-        coll = get_collection(collection_name=DEFAULT_COLLECTION_NAME)
-        all_in_coll = coll.get()
-        doc_ids = all_in_coll.get("ids", [])
-        metadatas = all_in_coll.get("metadatas", [])
+        analysis_id = res["analysis_id"]
+        expected_collection_name = generate_transient_ast_collection_name(analysis_id)
+        assert len(captured_transient_ast) == 1
+        snap = captured_transient_ast[0]
+        assert snap["collection_name"] == expected_collection_name
+        doc_ids = snap["data"].get("ids", [])
+        metadatas = snap["data"].get("metadatas", [])
 
         # The only ingested AST doc should be the security_evidence document from vuln.py
         assert len(doc_ids) == 1
@@ -96,18 +125,42 @@ def test_bounded_rag_ingestion_and_scope_coverage(dummy_mixed_repo):
             assert m.get("file_path") != "helper.py"
             assert m.get("file_path") != "utils.py"
 
-        # 6. RAG / advisory explanation attached in description
+        # 6. Transient collection cleanup verification:
+        # Transient collection must not persist in ChromaDB after analysis completes
+        client = initialize_vector_store(db_path=chroma_dir)
+        live_collections = [c.name for c in client.list_collections()]
+        assert expected_collection_name not in live_collections
+
+        # 7. RAG / advisory explanation attached in description
         assert len(f["description"]) > 0
 
-        # 7. Complete API response schema preserved
+        # 8. Complete API response schema preserved
         assert "analysis_id" in res
         assert "repository" in res
         assert "traceability" in res
         assert res["status"] == "success"
 
 
-def test_clean_repository_has_zero_transient_ast_embeddings(dummy_clean_repo):
-    with tempfile.TemporaryDirectory() as ws_root:
+def test_clean_repository_has_zero_transient_ast_embeddings(dummy_clean_repo, monkeypatch):
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as ws_root, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as chroma_dir:
+        captured_transient_ast = []
+        original_delete = delete_transient_collection
+
+        def spy_delete_transient_collection(collection_name: str, db_path=None):
+            coll = get_collection(collection_name=collection_name, db_path=db_path)
+            captured_transient_ast.append({
+                "collection_name": collection_name,
+                "data": coll.get(),
+                "count": coll.count(),
+                "db_path": db_path,
+            })
+            return original_delete(collection_name, db_path=db_path)
+
+        monkeypatch.setattr(
+            "backend.analysis.repository_orchestrator.delete_transient_collection",
+            spy_delete_transient_collection,
+        )
+
         acq = acquire_repository(
             repository_url="https://github.com/example/clean-repo",
             local_path=dummy_clean_repo,
@@ -115,7 +168,7 @@ def test_clean_repository_has_zero_transient_ast_embeddings(dummy_clean_repo):
         )
         acq_id = acq["acquisition"]["acquisition_id"]
 
-        res = analyze_repository(acquisition_id=acq_id, workspace_root=ws_root)
+        res = analyze_repository(acquisition_id=acq_id, workspace_root=ws_root, db_path=chroma_dir)
 
         assert res["status"] == "success"
         assert len(res["findings"]) == 0
@@ -123,5 +176,15 @@ def test_clean_repository_has_zero_transient_ast_embeddings(dummy_clean_repo):
         assert res["summary"]["analyzed_files"] == 2
 
         # Transient collection must have 0 documents embedded
-        coll = get_collection(collection_name=DEFAULT_COLLECTION_NAME)
-        assert coll.count() == 0
+        analysis_id = res["analysis_id"]
+        expected_collection_name = generate_transient_ast_collection_name(analysis_id)
+        assert len(captured_transient_ast) == 1
+        snap = captured_transient_ast[0]
+        assert snap["collection_name"] == expected_collection_name
+        assert snap["count"] == 0
+        assert len(snap["data"].get("ids", [])) == 0
+
+        # Transient collection must not persist in ChromaDB after analysis completes
+        client = initialize_vector_store(db_path=chroma_dir)
+        live_collections = [c.name for c in client.list_collections()]
+        assert expected_collection_name not in live_collections
