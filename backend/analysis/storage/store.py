@@ -19,7 +19,9 @@ from backend.analysis.storage.models import (
     ANALYSIS_SCHEMA_VERSION,
     DEFAULT_COMMIT_RESERVATION_TTL_SECONDS,
     DEFAULT_DELIVERY_TTL_SECONDS,
+    DEFAULT_NOTIFICATION_DISPATCH_TTL_SECONDS,
     DEFAULT_TIME_WINDOW,
+    MAX_NOTIFICATION_ATTEMPTS,
     VALID_REASON_CODES,
     VALID_TIME_WINDOWS,
     UserRecord,
@@ -375,6 +377,26 @@ class AnalysisStore:
                     CREATE INDEX IF NOT EXISTS idx_users_status_role ON users(status, role);
                     CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON user_sessions(user_id);
                     CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON user_sessions(expires_at);
+
+                    CREATE TABLE IF NOT EXISTS pr_notification_dispatches (
+                        dispatch_key TEXT PRIMARY KEY,
+                        owner TEXT NOT NULL,
+                        repository TEXT NOT NULL,
+                        pr_number INTEGER NOT NULL,
+                        head_sha TEXT NOT NULL,
+                        notification_type TEXT NOT NULL,
+                        analysis_id TEXT,
+                        status TEXT NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        last_status_code INTEGER,
+                        last_reason TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_notif_lookup ON pr_notification_dispatches(owner, repository, pr_number, head_sha, notification_type);
+                    CREATE INDEX IF NOT EXISTS idx_notif_status_exp ON pr_notification_dispatches(status, expires_at);
                 """)
 
                 # Additive Phase 31 schema migration for false_positives
@@ -2099,6 +2121,380 @@ class AnalysisStore:
                 "DELETE FROM pr_commit_reservations WHERE rowid IN ("
                 "SELECT rowid FROM pr_commit_reservations WHERE expires_at <= ? AND status = 'in_progress' LIMIT ?);",
                 (now_str, max(1, limit))
+            )
+            return cursor.rowcount
+
+    # =========================================================================
+    # Phase 3D-2C: Persistent Slack Notification Deduplication Methods
+    # =========================================================================
+
+    def get_notification_dispatch(
+        self,
+        owner: str,
+        repository: str,
+        pr_number: Any,
+        head_sha: str,
+        notification_type: str = "pr_security_gate",
+    ) -> Optional[Dict[str, Any]]:
+        """Retrieve current notification dispatch record if present."""
+        try:
+            clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
+                owner, repository, pr_number, head_sha
+            )
+        except Exception:
+            return None
+
+        clean_type = str(notification_type or "pr_security_gate").strip().lower()
+        dispatch_key = f"{clean_owner.lower()}/{clean_repo.lower()}:{clean_pr}:{clean_head.lower()}:{clean_type}"
+
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM pr_notification_dispatches WHERE dispatch_key = ?;",
+                (dispatch_key,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def claim_notification_dispatch(
+        self,
+        owner: str,
+        repository: str,
+        pr_number: Any,
+        head_sha: str,
+        notification_type: str = "pr_security_gate",
+        analysis_id: Optional[str] = None,
+        ttl_seconds: int = DEFAULT_NOTIFICATION_DISPATCH_TTL_SECONDS,
+        now_iso: Optional[str] = None,
+        max_attempts: int = MAX_NOTIFICATION_ATTEMPTS,
+        allow_unknown_retry: bool = False,
+    ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+        """Atomically claim notification dispatch rights for an exact PR commit.
+
+        Guarantees:
+        - If already 'sent' (confirmed delivered): returns (False, "already_sent", record).
+        - If 'sending' and unexpired: returns (False, "in_progress", record) to prevent concurrent dispatches.
+        - If 'unknown' (e.g. socket timeout): does NOT blindly retry unless allow_unknown_retry is explicitly True.
+        - If 'failed' with terminal error: returns (False, "terminal_failure", record).
+        - If 'failed' with max attempts exceeded: returns (False, "max_attempts_exceeded", record).
+        - If eligible to claim / retry: atomically sets status='sending' and increments attempts.
+
+        Returns:
+            (acquired: bool, reason: str, dispatch_record: Optional[Dict[str, Any]])
+        """
+        try:
+            clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
+                owner, repository, pr_number, head_sha
+            )
+        except Exception as e:
+            return False, f"invalid_identity_{type(e).__name__}", None
+
+        clean_type = str(notification_type or "pr_security_gate").strip().lower()
+        dispatch_key = f"{clean_owner.lower()}/{clean_repo.lower()}:{clean_pr}:{clean_head.lower()}:{clean_type}"
+
+        from datetime import datetime, timezone, timedelta
+
+        if now_iso:
+            clean_now = str(now_iso).strip().replace("Z", "+00:00")
+            now_dt = datetime.fromisoformat(clean_now).astimezone(timezone.utc)
+        else:
+            now_dt = datetime.now(timezone.utc)
+
+        now_str = now_dt.isoformat()
+        exp_dt = now_dt + timedelta(seconds=max(10, int(ttl_seconds)))
+        exp_str = exp_dt.isoformat()
+
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM pr_notification_dispatches WHERE dispatch_key = ?;",
+                (dispatch_key,)
+            ).fetchone()
+
+            if row:
+                rec = dict(row)
+                status = rec["status"]
+                attempts = int(rec.get("attempts", 0))
+                expires_at_str = rec.get("expires_at", "")
+
+                if status == "sent":
+                    return False, "already_sent", rec
+
+                elif status == "sending":
+                    try:
+                        clean_exp = str(expires_at_str).strip().replace("Z", "+00:00")
+                        exp_time = datetime.fromisoformat(clean_exp).astimezone(timezone.utc)
+                        if now_dt < exp_time:
+                            return False, "in_progress", rec
+                    except Exception:
+                        pass
+                    # Lease expired past TTL (crashed or hung worker) -> treat as retryable if attempts < max_attempts
+                    if attempts >= max_attempts:
+                        return False, "max_attempts_exceeded", rec
+
+                elif status == "failed":
+                    last_reason = str(rec.get("last_reason") or "").lower()
+                    if last_reason in ("invalid_webhook_url", "http_400", "payload_construction_error"):
+                        return False, "terminal_failure", rec
+                    if attempts >= max_attempts:
+                        return False, "max_attempts_exceeded", rec
+
+                elif status == "unknown":
+                    if not allow_unknown_retry:
+                        return False, "ambiguous_delivery_held", rec
+                    if attempts >= max_attempts:
+                        return False, "max_attempts_exceeded", rec
+
+                # Update existing record to 'sending'
+                conn.execute(
+                    """
+                    UPDATE pr_notification_dispatches
+                    SET status = 'sending',
+                        attempts = attempts + 1,
+                        analysis_id = COALESCE(?, analysis_id),
+                        updated_at = ?,
+                        expires_at = ?
+                    WHERE dispatch_key = ?;
+                    """,
+                    (str(analysis_id or ""), now_str, exp_str, dispatch_key)
+                )
+                updated_row = conn.execute(
+                    "SELECT * FROM pr_notification_dispatches WHERE dispatch_key = ?;",
+                    (dispatch_key,)
+                ).fetchone()
+                return True, "claimed", dict(updated_row) if updated_row else None
+
+            # Record does not exist: atomically insert initial 'sending' record
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO pr_notification_dispatches (
+                        dispatch_key, owner, repository, pr_number, head_sha,
+                        notification_type, analysis_id, status, attempts,
+                        last_status_code, last_reason, created_at, updated_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'sending', 1, NULL, NULL, ?, ?, ?);
+                    """,
+                    (
+                        dispatch_key, clean_owner, clean_repo, clean_pr, clean_head,
+                        clean_type, str(analysis_id or ""), now_str, now_str, exp_str
+                    )
+                )
+                inserted_row = conn.execute(
+                    "SELECT * FROM pr_notification_dispatches WHERE dispatch_key = ?;",
+                    (dispatch_key,)
+                ).fetchone()
+                return True, "claimed", dict(inserted_row) if inserted_row else None
+            except sqlite3.IntegrityError:
+                # Concurrent worker won the insert race
+                c_row = conn.execute(
+                    "SELECT * FROM pr_notification_dispatches WHERE dispatch_key = ?;",
+                    (dispatch_key,)
+                ).fetchone()
+                if c_row:
+                    c_rec = dict(c_row)
+                    if c_rec["status"] == "sent":
+                        return False, "already_sent", c_rec
+                    return False, "in_progress", c_rec
+                return False, "in_progress", None
+
+    def record_notification_success(
+        self,
+        owner: str,
+        repository: str,
+        pr_number: Any,
+        head_sha: str,
+        notification_type: str = "pr_security_gate",
+        analysis_id: Optional[str] = None,
+        status_code: int = 200,
+        now_iso: Optional[str] = None,
+    ) -> bool:
+        """Mark notification dispatch as confirmed delivered ('sent')."""
+        try:
+            clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
+                owner, repository, pr_number, head_sha
+            )
+        except Exception:
+            return False
+
+        clean_type = str(notification_type or "pr_security_gate").strip().lower()
+        dispatch_key = f"{clean_owner.lower()}/{clean_repo.lower()}:{clean_pr}:{clean_head.lower()}:{clean_type}"
+        now_str = now_iso or get_utc_now_iso()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO pr_notification_dispatches (
+                    dispatch_key, owner, repository, pr_number, head_sha,
+                    notification_type, analysis_id, status, attempts,
+                    last_status_code, last_reason, created_at, updated_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'sent', 1, ?, 'delivered', ?, ?, '9999-12-31T23:59:59+00:00')
+                ON CONFLICT(dispatch_key) DO UPDATE SET
+                    status = 'sent',
+                    last_status_code = excluded.last_status_code,
+                    last_reason = 'delivered',
+                    analysis_id = COALESCE(excluded.analysis_id, pr_notification_dispatches.analysis_id),
+                    updated_at = excluded.updated_at,
+                    expires_at = '9999-12-31T23:59:59+00:00';
+                """,
+                (
+                    dispatch_key, clean_owner, clean_repo, clean_pr, clean_head,
+                    clean_type, str(analysis_id or ""), int(status_code), now_str, now_str
+                )
+            )
+            return cursor.rowcount > 0
+
+    def record_notification_failure(
+        self,
+        owner: str,
+        repository: str,
+        pr_number: Any,
+        head_sha: str,
+        notification_type: str = "pr_security_gate",
+        status_code: Optional[int] = None,
+        reason: Optional[str] = None,
+        analysis_id: Optional[str] = None,
+        now_iso: Optional[str] = None,
+    ) -> bool:
+        """Mark notification dispatch as failed with sanitized reason code."""
+        try:
+            clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
+                owner, repository, pr_number, head_sha
+            )
+        except Exception:
+            return False
+
+        clean_type = str(notification_type or "pr_security_gate").strip().lower()
+        dispatch_key = f"{clean_owner.lower()}/{clean_repo.lower()}:{clean_pr}:{clean_head.lower()}:{clean_type}"
+        now_str = now_iso or get_utc_now_iso()
+
+        # Sanitize reason: preserve code identifiers only, never secrets or sensitive payload strings
+        raw_reason = str(reason or "failed").strip()[:100]
+        import re
+        clean_reason = re.sub(r"[^a-zA-Z0-9_\-]", "_", raw_reason)
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO pr_notification_dispatches (
+                    dispatch_key, owner, repository, pr_number, head_sha,
+                    notification_type, analysis_id, status, attempts,
+                    last_status_code, last_reason, created_at, updated_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'failed', 1, ?, ?, ?, ?, ?)
+                ON CONFLICT(dispatch_key) DO UPDATE SET
+                    status = 'failed',
+                    last_status_code = excluded.last_status_code,
+                    last_reason = excluded.last_reason,
+                    analysis_id = COALESCE(excluded.analysis_id, pr_notification_dispatches.analysis_id),
+                    updated_at = excluded.updated_at,
+                    expires_at = excluded.expires_at;
+                """,
+                (
+                    dispatch_key, clean_owner, clean_repo, clean_pr, clean_head,
+                    clean_type, str(analysis_id or ""),
+                    int(status_code) if status_code is not None else None,
+                    clean_reason, now_str, now_str, now_str
+                )
+            )
+            return cursor.rowcount > 0
+
+    def record_notification_unknown(
+        self,
+        owner: str,
+        repository: str,
+        pr_number: Any,
+        head_sha: str,
+        notification_type: str = "pr_security_gate",
+        reason: Optional[str] = "timeout",
+        analysis_id: Optional[str] = None,
+        now_iso: Optional[str] = None,
+    ) -> bool:
+        """Mark notification dispatch as unknown (e.g. socket timeout after partial transmission)."""
+        try:
+            clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
+                owner, repository, pr_number, head_sha
+            )
+        except Exception:
+            return False
+
+        clean_type = str(notification_type or "pr_security_gate").strip().lower()
+        dispatch_key = f"{clean_owner.lower()}/{clean_repo.lower()}:{clean_pr}:{clean_head.lower()}:{clean_type}"
+        now_str = now_iso or get_utc_now_iso()
+        clean_reason = str(reason or "timeout").strip()[:100]
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO pr_notification_dispatches (
+                    dispatch_key, owner, repository, pr_number, head_sha,
+                    notification_type, analysis_id, status, attempts,
+                    last_status_code, last_reason, created_at, updated_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'unknown', 1, NULL, ?, ?, ?, ?)
+                ON CONFLICT(dispatch_key) DO UPDATE SET
+                    status = 'unknown',
+                    last_status_code = NULL,
+                    last_reason = excluded.last_reason,
+                    analysis_id = COALESCE(excluded.analysis_id, pr_notification_dispatches.analysis_id),
+                    updated_at = excluded.updated_at,
+                    expires_at = excluded.expires_at;
+                """,
+                (
+                    dispatch_key, clean_owner, clean_repo, clean_pr, clean_head,
+                    clean_type, str(analysis_id or ""), clean_reason, now_str, now_str, now_str
+                )
+            )
+            return cursor.rowcount > 0
+
+    def release_notification_dispatch(
+        self,
+        owner: str,
+        repository: str,
+        pr_number: Any,
+        head_sha: str,
+        notification_type: str = "pr_security_gate",
+    ) -> bool:
+        """Release or delete in-flight notification dispatch claim (e.g. on unconfigured webhook or exception)."""
+        try:
+            clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
+                owner, repository, pr_number, head_sha
+            )
+        except Exception:
+            return False
+
+        clean_type = str(notification_type or "pr_security_gate").strip().lower()
+        dispatch_key = f"{clean_owner.lower()}/{clean_repo.lower()}:{clean_pr}:{clean_head.lower()}:{clean_type}"
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM pr_notification_dispatches WHERE dispatch_key = ? AND status = 'sending';",
+                (dispatch_key,)
+            )
+            return cursor.rowcount > 0
+
+    def cleanup_expired_notification_dispatches(
+        self,
+        now_iso: Optional[str] = None,
+        limit: int = 100,
+        retention_days: int = 30,
+    ) -> int:
+        """Bounded deletion of stale terminal notification records older than retention_days."""
+        from datetime import datetime, timezone, timedelta
+
+        if now_iso:
+            clean_now = str(now_iso).strip().replace("Z", "+00:00")
+            now_dt = datetime.fromisoformat(clean_now).astimezone(timezone.utc)
+        else:
+            now_dt = datetime.now(timezone.utc)
+
+        cutoff_str = (now_dt - timedelta(days=max(1, retention_days))).isoformat()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM pr_notification_dispatches
+                WHERE rowid IN (
+                    SELECT rowid FROM pr_notification_dispatches
+                    WHERE updated_at <= ? AND status IN ('sent', 'failed')
+                    LIMIT ?
+                );
+                """,
+                (cutoff_str, max(1, limit))
             )
             return cursor.rowcount
 

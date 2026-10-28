@@ -732,23 +732,102 @@ def orchestrate_webhook_event(
                 }
 
 
-            # Dispatch optional Slack notification (isolated side-effect)
+            # Dispatch optional Slack notification (Phase 3D-2C persistent deduplication)
             slack_res = None
             if send_slack_pr_alert_sync is not None:
                 try:
-                    pr_title = pr_obj.get("title", "") if isinstance(pr_obj, dict) else f"PR #{clean_pr_num}"
-                    raw_url = pr_obj.get("html_url") if isinstance(pr_obj, dict) else None
-                    pr_url = raw_url if raw_url and str(raw_url).startswith("https://") else f"https://github.com/{clean_owner}/{clean_repo}/pull/{clean_pr_num}"
-                    slack_res = send_slack_pr_alert_sync(
-                        report=report,
-                        pr_number=clean_pr_num,
-                        pr_title=pr_title or f"PR #{clean_pr_num}",
-                        pr_author=pr_author,
-                        repo_full_name=f"{clean_owner}/{clean_repo}",
-                        pr_url=pr_url
-                    )
-                except Exception:
-                    slack_res = {"status": "failed", "reason": "unexpected_error"}
+                    active_store = store or _get_analysis_store(db_path=db_path)
+                    notif_claimed = False
+                    notif_reason = "store_unavailable"
+
+                    if active_store is not None:
+                        notif_claimed, notif_reason, _ = active_store.claim_notification_dispatch(
+                            owner=clean_owner,
+                            repository=clean_repo,
+                            pr_number=clean_pr_num,
+                            head_sha=clean_head_sha,
+                            notification_type="pr_security_gate",
+                            analysis_id=report.get("analysis_id"),
+                        )
+                    else:
+                        notif_claimed = True
+
+                    if not notif_claimed:
+                        # Notification is already sent, in progress, or exceeded max attempts
+                        slack_res = {
+                            "status": "skipped",
+                            "reason": notif_reason,
+                        }
+                    else:
+                        pr_title = pr_obj.get("title", "") if isinstance(pr_obj, dict) else f"PR #{clean_pr_num}"
+                        raw_url = pr_obj.get("html_url") if isinstance(pr_obj, dict) else None
+                        pr_url = raw_url if raw_url and str(raw_url).startswith("https://") else f"https://github.com/{clean_owner}/{clean_repo}/pull/{clean_pr_num}"
+                        slack_res = send_slack_pr_alert_sync(
+                            report=report,
+                            pr_number=clean_pr_num,
+                            pr_title=pr_title or f"PR #{clean_pr_num}",
+                            pr_author=pr_author,
+                            repo_full_name=f"{clean_owner}/{clean_repo}",
+                            pr_url=pr_url
+                        )
+
+                        # Record outcome in persistent ledger
+                        if active_store is not None:
+                            if isinstance(slack_res, dict) and slack_res.get("status") == "delivered":
+                                active_store.record_notification_success(
+                                    owner=clean_owner,
+                                    repository=clean_repo,
+                                    pr_number=clean_pr_num,
+                                    head_sha=clean_head_sha,
+                                    notification_type="pr_security_gate",
+                                    analysis_id=report.get("analysis_id"),
+                                    status_code=slack_res.get("status_code", 200),
+                                )
+                            elif isinstance(slack_res, dict) and slack_res.get("status") == "skipped":
+                                # Webhook not configured -> release claim so it doesn't linger in 'sending'
+                                active_store.release_notification_dispatch(
+                                    owner=clean_owner,
+                                    repository=clean_repo,
+                                    pr_number=clean_pr_num,
+                                    head_sha=clean_head_sha,
+                                    notification_type="pr_security_gate",
+                                )
+                            elif isinstance(slack_res, dict) and slack_res.get("reason") == "timeout":
+                                active_store.record_notification_unknown(
+                                    owner=clean_owner,
+                                    repository=clean_repo,
+                                    pr_number=clean_pr_num,
+                                    head_sha=clean_head_sha,
+                                    notification_type="pr_security_gate",
+                                    reason="timeout",
+                                    analysis_id=report.get("analysis_id"),
+                                )
+                            else:
+                                raw_code = slack_res.get("status_code") if isinstance(slack_res, dict) else None
+                                raw_fail_reason = slack_res.get("reason") if isinstance(slack_res, dict) else "failed"
+                                active_store.record_notification_failure(
+                                    owner=clean_owner,
+                                    repository=clean_repo,
+                                    pr_number=clean_pr_num,
+                                    head_sha=clean_head_sha,
+                                    notification_type="pr_security_gate",
+                                    status_code=raw_code,
+                                    reason=raw_fail_reason,
+                                    analysis_id=report.get("analysis_id"),
+                                )
+                except Exception as slack_err:
+                    slack_res = {"status": "failed", "reason": f"unexpected_error_{type(slack_err).__name__}"}
+                    if active_store is not None:
+                        try:
+                            active_store.release_notification_dispatch(
+                                owner=clean_owner,
+                                repository=clean_repo,
+                                pr_number=clean_pr_num,
+                                head_sha=clean_head_sha,
+                                notification_type="pr_security_gate",
+                            )
+                        except Exception:
+                            pass
 
             # Determine orchestration publication status (Phase 3B)
             status_pub_failed = (

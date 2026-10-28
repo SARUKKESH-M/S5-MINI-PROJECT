@@ -258,6 +258,13 @@ DEFAULT_COMMIT_RESERVATION_TTL_SECONDS = 300  # 5 minutes bounded recovery
 
 
 # ============================================================================
+# Phase 3D-2C: Persistent Slack Notification Deduplication Contracts
+# ============================================================================
+DEFAULT_NOTIFICATION_DISPATCH_TTL_SECONDS = 60  # 60s lease window for in-flight sending
+MAX_NOTIFICATION_ATTEMPTS = 3  # Maximum retry attempts for transient errors
+
+
+# ============================================================================
 # Phase A3: User & Access-Control Storage Models
 # ============================================================================
 
