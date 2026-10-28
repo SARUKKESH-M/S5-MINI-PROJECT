@@ -8,9 +8,13 @@ and Step 6T platform capabilities (Policy profiles, Scope exclusion, Incremental
 """
 
 import gc
+import logging
+import sqlite3
 import time
 import uuid
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from ast_engine.rag_adapter import prepare_ast_documents_for_rag
 from ast_engine.evidence_normalizer import normalize_security_evidence
@@ -316,21 +320,50 @@ def _safely_persist_repository_analysis(
     res: Dict[str, Any],
     db_path: Optional[str] = None,
     user_id: Optional[str] = None,
-) -> None:
-    """Safely persist repository analysis record without exposing exceptions."""
-    try:
-        store = AnalysisStore(db_path=db_path)
-        repo_name = res.get("repository", {}).get("repository", "") if isinstance(res.get("repository"), dict) else ""
-        record_payload = {
-            "status": res.get("status", "completed"),
-            "analysis_id": res["analysis_id"],
-            "query": f"Repository Analysis: {repo_name}",
-            "summary": res["summary"],
-            "findings": res["findings"],
-            "repository": res.get("repository"),
-            "review_status": res.get("review_status", "allow"),
-            "user_id": user_id,
-        }
-        store.save_analysis(record_payload)
-    except Exception:
-        pass
+    max_retries: int = 2,
+    base_backoff_sec: float = 0.05,
+) -> bool:
+    """Safely persist repository analysis record with bounded retry for transient locks.
+
+    Never exposes internal database exceptions to the outer caller.
+    """
+    analysis_id = res.get("analysis_id", "unknown") if isinstance(res, dict) else "unknown"
+    repo_name = res.get("repository", {}).get("repository", "") if isinstance(res.get("repository"), dict) else ""
+    record_payload = {
+        "status": res.get("status", "completed"),
+        "analysis_id": res.get("analysis_id"),
+        "query": f"Repository Analysis: {repo_name}",
+        "summary": res.get("summary"),
+        "findings": res.get("findings"),
+        "repository": res.get("repository"),
+        "review_status": res.get("review_status", "allow"),
+        "user_id": user_id,
+    }
+
+    for attempt in range(max_retries + 1):
+        try:
+            store = AnalysisStore(db_path=db_path)
+            store.save_analysis(record_payload)
+            return True
+        except sqlite3.OperationalError as e:
+            err_msg = str(e).lower()
+            if ("locked" in err_msg or "busy" in err_msg) and attempt < max_retries:
+                backoff = base_backoff_sec * (2 ** attempt)
+                logger.warning(
+                    "Transient SQLite lock persisting analysis %s (attempt %d/%d). Retrying in %.3fs.",
+                    analysis_id, attempt + 1, max_retries + 1, backoff
+                )
+                time.sleep(backoff)
+                continue
+            logger.error(
+                "Failed to persist repository analysis %s due to SQLite operational error (%s).",
+                analysis_id, type(e).__name__
+            )
+            return False
+        except Exception as e:
+            logger.error(
+                "Unexpected error persisting repository analysis %s (%s).",
+                analysis_id, type(e).__name__
+            )
+            return False
+    return False

@@ -14,7 +14,8 @@ import os
 import sqlite3
 import threading
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 from backend.analysis.storage.models import (
     ANALYSIS_SCHEMA_VERSION,
     DEFAULT_COMMIT_RESERVATION_TTL_SECONDS,
@@ -232,20 +233,72 @@ class AnalysisStore:
 
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or get_default_db_path()
+        self._is_memory = (self.db_path == ":memory:") or (
+            isinstance(self.db_path, str) and "mode=memory" in self.db_path
+        )
+        self._mem_conn: Optional[sqlite3.Connection] = None
+        self._mem_lock = threading.Lock()
+        if self._is_memory:
+            self._mem_conn = sqlite3.connect(
+                self.db_path,
+                timeout=10.0,
+                uri=isinstance(self.db_path, str) and self.db_path.startswith("file:"),
+                check_same_thread=False,
+            )
+            self._mem_conn.row_factory = sqlite3.Row
+            self._mem_conn.execute("PRAGMA foreign_keys = ON;")
+            self._mem_conn.execute("PRAGMA busy_timeout = 10000;")
         self.initialize()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """Create and return a configured SQLite connection with foreign keys and WAL enabled."""
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.execute("PRAGMA foreign_keys = ON;")
-        conn.execute("PRAGMA busy_timeout = 5000;")
-        if self.db_path != ":memory:":
+    @contextmanager
+    def _get_connection(self) -> Iterator[sqlite3.Connection]:
+        """Create and yield a configured SQLite connection with foreign keys and WAL enabled.
+
+        Guarantees deterministic connection closure on success and exceptions for file-backed
+        databases, while preserving transaction semantics (commit on success, rollback on exception).
+        For in-memory databases (:memory: or mode=memory), connection persistence is maintained.
+        """
+        if self._is_memory and self._mem_conn is not None:
+            with self._mem_lock:
+                with self._mem_conn:
+                    yield self._mem_conn
+        else:
+            conn = sqlite3.connect(
+                self.db_path,
+                timeout=10.0,
+                uri=isinstance(self.db_path, str) and self.db_path.startswith("file:"),
+            )
+            conn.execute("PRAGMA foreign_keys = ON;")
+            conn.execute("PRAGMA busy_timeout = 10000;")
+            if not self._is_memory:
+                try:
+                    conn.execute("PRAGMA synchronous = NORMAL;")
+                except sqlite3.OperationalError:
+                    pass
+            conn.row_factory = sqlite3.Row
             try:
-                conn.execute("PRAGMA synchronous = NORMAL;")
-            except sqlite3.OperationalError:
+                with conn:
+                    yield conn
+            finally:
+                conn.close()
+
+    def close(self) -> None:
+        """Close any lingering in-memory database connection."""
+        if self._mem_conn is not None:
+            try:
+                self._mem_conn.close()
+            except Exception:
                 pass
-        conn.row_factory = sqlite3.Row
-        return conn
+            self._mem_conn = None
+
+    def __enter__(self) -> "AnalysisStore":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        self.close()
 
     def initialize(self, force: bool = False) -> None:
         """Initialize database directory, tables, indexes, and additive schema columns.
@@ -257,7 +310,7 @@ class AnalysisStore:
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
 
-        is_memory = self.db_path == ":memory:"
+        is_memory = self._is_memory
         norm_path = ":memory:" if is_memory else os.path.normcase(os.path.abspath(self.db_path))
 
         if not force and not is_memory:
@@ -623,25 +676,28 @@ class AnalysisStore:
                 ),
             )
 
-            # Insert findings
-            for idx, f in enumerate(sanitized_findings, start=1):
-                f_id = f["finding_id"] or f"finding_{idx}"
-                conn.execute(
+            # Insert findings in batch
+            findings_params = [
+                (
+                    f["finding_id"] or f"finding_{idx}",
+                    analysis_id,
+                    f["title"],
+                    f["description"],
+                    f["severity"],
+                    f["confidence"],
+                    f["category"],
+                    json.dumps(f["evidence"]),
+                )
+                for idx, f in enumerate(sanitized_findings, start=1)
+            ]
+            if findings_params:
+                conn.executemany(
                     """
                     INSERT INTO findings (
                         finding_id, analysis_id, title, description, severity, confidence, category, evidence_json
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
                     """,
-                    (
-                        f_id,
-                        analysis_id,
-                        f["title"],
-                        f["description"],
-                        f["severity"],
-                        f["confidence"],
-                        f["category"],
-                        json.dumps(f["evidence"]),
-                    ),
+                    findings_params,
                 )
 
             pass
@@ -1962,6 +2018,17 @@ class AnalysisStore:
         exp_str = exp_dt.isoformat()
 
         with self._get_connection() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE;")
+            except sqlite3.OperationalError as e:
+                err_msg = str(e).lower()
+                if "cannot start a transaction" in err_msg:
+                    pass
+                elif "locked" in err_msg or "busy" in err_msg:
+                    return False, "in_progress", None
+                else:
+                    raise
+
             # 1. Check if completed analysis already exists in analyses
             existing = conn.execute(
                 """

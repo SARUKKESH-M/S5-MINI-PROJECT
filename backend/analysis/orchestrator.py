@@ -5,7 +5,12 @@ LLM Context Building, LLM Security Analyzer execution, and persistent storage
 of analysis results into a unified workflow.
 """
 
+import logging
+import sqlite3
+import time
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 from ast_engine.rag_adapter import prepare_ast_documents_for_rag
 from ast_engine.evidence_normalizer import normalize_security_evidence
 from rag.ingestion import ingest_documents
@@ -174,10 +179,41 @@ def analyze_source_code(
         }
 
 
-def _safely_persist_analysis(res: Dict[str, Any], db_path: Optional[str] = None) -> None:
-    """Safely persist analysis result without exposing database exceptions to caller."""
-    try:
-        store = AnalysisStore(db_path=db_path)
-        store.save_analysis(res)
-    except Exception:
-        pass
+def _safely_persist_analysis(
+    res: Dict[str, Any],
+    db_path: Optional[str] = None,
+    max_retries: int = 2,
+    base_backoff_sec: float = 0.05,
+) -> bool:
+    """Safely persist analysis result with bounded retry for transient locks.
+
+    Never exposes internal database exceptions to caller.
+    """
+    analysis_id = res.get("analysis_id", "unknown") if isinstance(res, dict) else "unknown"
+    for attempt in range(max_retries + 1):
+        try:
+            store = AnalysisStore(db_path=db_path)
+            store.save_analysis(res)
+            return True
+        except sqlite3.OperationalError as e:
+            err_msg = str(e).lower()
+            if ("locked" in err_msg or "busy" in err_msg) and attempt < max_retries:
+                backoff = base_backoff_sec * (2 ** attempt)
+                logger.warning(
+                    "Transient SQLite lock persisting analysis %s (attempt %d/%d). Retrying in %.3fs.",
+                    analysis_id, attempt + 1, max_retries + 1, backoff
+                )
+                time.sleep(backoff)
+                continue
+            logger.error(
+                "Failed to persist analysis %s due to SQLite operational error (%s).",
+                analysis_id, type(e).__name__
+            )
+            return False
+        except Exception as e:
+            logger.error(
+                "Unexpected error persisting analysis %s (%s).",
+                analysis_id, type(e).__name__
+            )
+            return False
+    return False
