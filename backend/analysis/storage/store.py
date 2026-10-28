@@ -385,6 +385,7 @@ class AnalysisStore:
                         pr_number INTEGER NOT NULL,
                         head_sha TEXT NOT NULL,
                         notification_type TEXT NOT NULL,
+                        claim_id TEXT,
                         analysis_id TEXT,
                         status TEXT NOT NULL,
                         attempts INTEGER NOT NULL DEFAULT 0,
@@ -479,6 +480,12 @@ class AnalysisStore:
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
                     CREATE INDEX IF NOT EXISTS idx_users_status_role ON users(status, role);
                 """)
+
+                # Additive Phase 3D-2C schema migration for pr_notification_dispatches (fencing token)
+                notif_info = conn.execute("PRAGMA table_info(pr_notification_dispatches);").fetchall()
+                notif_cols = {row["name"] for row in notif_info}
+                if "claim_id" not in notif_cols:
+                    conn.execute("ALTER TABLE pr_notification_dispatches ADD COLUMN claim_id TEXT DEFAULT NULL;")
 
             if not is_memory and os.path.exists(norm_path):
                 _INITIALIZED_DATABASES[norm_path] = os.path.getmtime(norm_path)
@@ -2170,12 +2177,17 @@ class AnalysisStore:
         """Atomically claim notification dispatch rights for an exact PR commit.
 
         Guarantees:
+        - Issues a fresh, unique fencing token (claim_id) on every successful claim or reclamation.
         - If already 'sent' (confirmed delivered): returns (False, "already_sent", record).
         - If 'sending' and unexpired: returns (False, "in_progress", record) to prevent concurrent dispatches.
         - If 'unknown' (e.g. socket timeout): does NOT blindly retry unless allow_unknown_retry is explicitly True.
         - If 'failed' with terminal error: returns (False, "terminal_failure", record).
         - If 'failed' with max attempts exceeded: returns (False, "max_attempts_exceeded", record).
-        - If eligible to claim / retry: atomically sets status='sending' and increments attempts.
+        - Expired lease reclamation is atomic and conditional on (status, attempts); only one contender wins.
+        - Note on network/crash boundaries: In the absence of 2PC with external webhooks, if a process crashes
+          after Slack accepts an alert but before local persistence commits, the record remains 'sending' until TTL
+          expires. Exactly-once is theoretically impossible over network partitions, but at-most-once delivery
+          and deterministic claim fencing are strictly enforced.
 
         Returns:
             (acquired: bool, reason: str, dispatch_record: Optional[Dict[str, Any]])
@@ -2201,6 +2213,7 @@ class AnalysisStore:
         now_str = now_dt.isoformat()
         exp_dt = now_dt + timedelta(seconds=max(10, int(ttl_seconds)))
         exp_str = exp_dt.isoformat()
+        new_claim_id = f"clm_{uuid.uuid4().hex}"
 
         with self._get_connection() as conn:
             row = conn.execute(
@@ -2242,38 +2255,53 @@ class AnalysisStore:
                     if attempts >= max_attempts:
                         return False, "max_attempts_exceeded", rec
 
-                # Update existing record to 'sending'
-                conn.execute(
+                # Atomic conditional update matching the observed status and attempts
+                # Ensures only one contender can acquire an expired or retryable lease
+                cursor = conn.execute(
                     """
                     UPDATE pr_notification_dispatches
                     SET status = 'sending',
                         attempts = attempts + 1,
+                        claim_id = ?,
                         analysis_id = COALESCE(?, analysis_id),
                         updated_at = ?,
                         expires_at = ?
-                    WHERE dispatch_key = ?;
+                    WHERE dispatch_key = ? AND status = ? AND attempts = ?;
                     """,
-                    (str(analysis_id or ""), now_str, exp_str, dispatch_key)
+                    (new_claim_id, str(analysis_id or ""), now_str, exp_str, dispatch_key, status, attempts)
                 )
+                if cursor.rowcount == 0:
+                    # Lost race to another concurrent worker reclaiming the lease
+                    c_row = conn.execute(
+                        "SELECT * FROM pr_notification_dispatches WHERE dispatch_key = ?;",
+                        (dispatch_key,)
+                    ).fetchone()
+                    if c_row:
+                        c_rec = dict(c_row)
+                        if c_rec["status"] == "sent":
+                            return False, "already_sent", c_rec
+                        return False, "in_progress", c_rec
+                    return False, "in_progress", None
+
                 updated_row = conn.execute(
                     "SELECT * FROM pr_notification_dispatches WHERE dispatch_key = ?;",
                     (dispatch_key,)
                 ).fetchone()
                 return True, "claimed", dict(updated_row) if updated_row else None
 
-            # Record does not exist: atomically insert initial 'sending' record
+            # Record does not exist: atomically insert initial 'sending' record with new_claim_id
             try:
                 conn.execute(
                     """
                     INSERT INTO pr_notification_dispatches (
                         dispatch_key, owner, repository, pr_number, head_sha,
-                        notification_type, analysis_id, status, attempts,
+                        notification_type, claim_id, analysis_id, status, attempts,
                         last_status_code, last_reason, created_at, updated_at, expires_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'sending', 1, NULL, NULL, ?, ?, ?);
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sending', 1, NULL, NULL, ?, ?, ?);
                     """,
                     (
                         dispatch_key, clean_owner, clean_repo, clean_pr, clean_head,
-                        clean_type, str(analysis_id or ""), now_str, now_str, exp_str
+                        clean_type, new_claim_id, str(analysis_id or ""), now_str, now_str, exp_str
                     )
                 )
                 inserted_row = conn.execute(
@@ -2304,8 +2332,16 @@ class AnalysisStore:
         analysis_id: Optional[str] = None,
         status_code: int = 200,
         now_iso: Optional[str] = None,
+        claim_id: Optional[str] = None,
     ) -> bool:
-        """Mark notification dispatch as confirmed delivered ('sent')."""
+        """Mark notification dispatch as confirmed delivered ('sent').
+
+        Guarantees:
+        - Requires matching claim_id (if supplied or record has claim_id) to prevent stale workers from mutating state.
+        - Only transitions from 'sending' -> 'sent'.
+        - Once 'sent', terminal record cannot be downgraded or altered by subsequent stale workers.
+        - Returns True only if exactly 1 row was transitioned to 'sent'.
+        """
         try:
             clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
                 owner, repository, pr_number, head_sha
@@ -2322,20 +2358,22 @@ class AnalysisStore:
                 """
                 INSERT INTO pr_notification_dispatches (
                     dispatch_key, owner, repository, pr_number, head_sha,
-                    notification_type, analysis_id, status, attempts,
+                    notification_type, claim_id, analysis_id, status, attempts,
                     last_status_code, last_reason, created_at, updated_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'sent', 1, ?, 'delivered', ?, ?, '9999-12-31T23:59:59+00:00')
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sent', 1, ?, 'delivered', ?, ?, '9999-12-31T23:59:59+00:00')
                 ON CONFLICT(dispatch_key) DO UPDATE SET
                     status = 'sent',
                     last_status_code = excluded.last_status_code,
                     last_reason = 'delivered',
                     analysis_id = COALESCE(excluded.analysis_id, pr_notification_dispatches.analysis_id),
                     updated_at = excluded.updated_at,
-                    expires_at = '9999-12-31T23:59:59+00:00';
+                    expires_at = '9999-12-31T23:59:59+00:00'
+                WHERE pr_notification_dispatches.status = 'sending' AND (excluded.claim_id IS NULL OR pr_notification_dispatches.claim_id = excluded.claim_id);
                 """,
                 (
                     dispatch_key, clean_owner, clean_repo, clean_pr, clean_head,
-                    clean_type, str(analysis_id or ""), int(status_code), now_str, now_str
+                    clean_type, str(claim_id) if claim_id is not None else None,
+                    str(analysis_id or ""), int(status_code), now_str, now_str
                 )
             )
             return cursor.rowcount > 0
@@ -2351,8 +2389,15 @@ class AnalysisStore:
         reason: Optional[str] = None,
         analysis_id: Optional[str] = None,
         now_iso: Optional[str] = None,
+        claim_id: Optional[str] = None,
     ) -> bool:
-        """Mark notification dispatch as failed with sanitized reason code."""
+        """Mark notification dispatch as failed with sanitized reason code.
+
+        Guarantees:
+        - NEVER overwrites a confirmed 'sent' status.
+        - Requires matching claim_id (if supplied) to prevent stale workers from mutating newer state.
+        - Returns True if row was updated.
+        """
         try:
             clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
                 owner, repository, pr_number, head_sha
@@ -2370,28 +2415,49 @@ class AnalysisStore:
         clean_reason = re.sub(r"[^a-zA-Z0-9_\-]", "_", raw_reason)
 
         with self._get_connection() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO pr_notification_dispatches (
-                    dispatch_key, owner, repository, pr_number, head_sha,
-                    notification_type, analysis_id, status, attempts,
-                    last_status_code, last_reason, created_at, updated_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'failed', 1, ?, ?, ?, ?, ?)
-                ON CONFLICT(dispatch_key) DO UPDATE SET
-                    status = 'failed',
-                    last_status_code = excluded.last_status_code,
-                    last_reason = excluded.last_reason,
-                    analysis_id = COALESCE(excluded.analysis_id, pr_notification_dispatches.analysis_id),
-                    updated_at = excluded.updated_at,
-                    expires_at = excluded.expires_at;
-                """,
-                (
-                    dispatch_key, clean_owner, clean_repo, clean_pr, clean_head,
-                    clean_type, str(analysis_id or ""),
-                    int(status_code) if status_code is not None else None,
-                    clean_reason, now_str, now_str, now_str
+            if claim_id is not None:
+                cursor = conn.execute(
+                    """
+                    UPDATE pr_notification_dispatches
+                    SET status = 'failed',
+                        last_status_code = ?,
+                        last_reason = ?,
+                        analysis_id = COALESCE(?, analysis_id),
+                        updated_at = ?,
+                        expires_at = ?
+                    WHERE dispatch_key = ? AND status != 'sent' AND claim_id = ?;
+                    """,
+                    (
+                        int(status_code) if status_code is not None else None,
+                        clean_reason,
+                        str(analysis_id or ""),
+                        now_str,
+                        now_str,
+                        dispatch_key,
+                        str(claim_id)
+                    )
                 )
-            )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE pr_notification_dispatches
+                    SET status = 'failed',
+                        last_status_code = ?,
+                        last_reason = ?,
+                        analysis_id = COALESCE(?, analysis_id),
+                        updated_at = ?,
+                        expires_at = ?
+                    WHERE dispatch_key = ? AND status != 'sent';
+                    """,
+                    (
+                        int(status_code) if status_code is not None else None,
+                        clean_reason,
+                        str(analysis_id or ""),
+                        now_str,
+                        now_str,
+                        dispatch_key
+                    )
+                )
             return cursor.rowcount > 0
 
     def record_notification_unknown(
@@ -2404,8 +2470,15 @@ class AnalysisStore:
         reason: Optional[str] = "timeout",
         analysis_id: Optional[str] = None,
         now_iso: Optional[str] = None,
+        claim_id: Optional[str] = None,
     ) -> bool:
-        """Mark notification dispatch as unknown (e.g. socket timeout after partial transmission)."""
+        """Mark notification dispatch as unknown (e.g. socket timeout after partial transmission).
+
+        Guarantees:
+        - NEVER overwrites a confirmed 'sent' status.
+        - Requires matching claim_id (if supplied) to prevent stale workers from mutating newer state.
+        - Returns True if row was updated.
+        """
         try:
             clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
                 owner, repository, pr_number, head_sha
@@ -2419,26 +2492,34 @@ class AnalysisStore:
         clean_reason = str(reason or "timeout").strip()[:100]
 
         with self._get_connection() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO pr_notification_dispatches (
-                    dispatch_key, owner, repository, pr_number, head_sha,
-                    notification_type, analysis_id, status, attempts,
-                    last_status_code, last_reason, created_at, updated_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'unknown', 1, NULL, ?, ?, ?, ?)
-                ON CONFLICT(dispatch_key) DO UPDATE SET
-                    status = 'unknown',
-                    last_status_code = NULL,
-                    last_reason = excluded.last_reason,
-                    analysis_id = COALESCE(excluded.analysis_id, pr_notification_dispatches.analysis_id),
-                    updated_at = excluded.updated_at,
-                    expires_at = excluded.expires_at;
-                """,
-                (
-                    dispatch_key, clean_owner, clean_repo, clean_pr, clean_head,
-                    clean_type, str(analysis_id or ""), clean_reason, now_str, now_str, now_str
+            if claim_id is not None:
+                cursor = conn.execute(
+                    """
+                    UPDATE pr_notification_dispatches
+                    SET status = 'unknown',
+                        last_status_code = NULL,
+                        last_reason = ?,
+                        analysis_id = COALESCE(?, analysis_id),
+                        updated_at = ?,
+                        expires_at = ?
+                    WHERE dispatch_key = ? AND status != 'sent' AND claim_id = ?;
+                    """,
+                    (clean_reason, str(analysis_id or ""), now_str, now_str, dispatch_key, str(claim_id))
                 )
-            )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE pr_notification_dispatches
+                    SET status = 'unknown',
+                        last_status_code = NULL,
+                        last_reason = ?,
+                        analysis_id = COALESCE(?, analysis_id),
+                        updated_at = ?,
+                        expires_at = ?
+                    WHERE dispatch_key = ? AND status != 'sent';
+                    """,
+                    (clean_reason, str(analysis_id or ""), now_str, now_str, dispatch_key)
+                )
             return cursor.rowcount > 0
 
     def release_notification_dispatch(
@@ -2448,8 +2529,14 @@ class AnalysisStore:
         pr_number: Any,
         head_sha: str,
         notification_type: str = "pr_security_gate",
+        claim_id: Optional[str] = None,
     ) -> bool:
-        """Release or delete in-flight notification dispatch claim (e.g. on unconfigured webhook or exception)."""
+        """Release or delete in-flight notification dispatch claim (e.g. on unconfigured webhook or early error).
+
+        Guarantees:
+        - Only deletes rows in 'sending' status.
+        - Requires matching claim_id (if provided) so stale workers cannot delete a newer worker's active claim.
+        """
         try:
             clean_owner, clean_repo, clean_pr, clean_head = _validate_pr_identity(
                 owner, repository, pr_number, head_sha
@@ -2461,10 +2548,16 @@ class AnalysisStore:
         dispatch_key = f"{clean_owner.lower()}/{clean_repo.lower()}:{clean_pr}:{clean_head.lower()}:{clean_type}"
 
         with self._get_connection() as conn:
-            cursor = conn.execute(
-                "DELETE FROM pr_notification_dispatches WHERE dispatch_key = ? AND status = 'sending';",
-                (dispatch_key,)
-            )
+            if claim_id is not None:
+                cursor = conn.execute(
+                    "DELETE FROM pr_notification_dispatches WHERE dispatch_key = ? AND status = 'sending' AND claim_id = ?;",
+                    (dispatch_key, str(claim_id))
+                )
+            else:
+                cursor = conn.execute(
+                    "DELETE FROM pr_notification_dispatches WHERE dispatch_key = ? AND status = 'sending';",
+                    (dispatch_key,)
+                )
             return cursor.rowcount > 0
 
     def cleanup_expired_notification_dispatches(

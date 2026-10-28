@@ -473,3 +473,262 @@ def test_no_secret_leakage_in_notification_ledger(temp_db):
     # Verifies reason only contains alphanumeric and underscores
     import re
     assert re.match(r"^[a-zA-Z0-9_\-]+$", rec["last_reason"])
+
+
+# ============================================================================
+# Phase 3D-2C Corrective Hardening Regression Tests
+# ============================================================================
+
+def test_claim_fencing_token_rejects_stale_worker_outcomes(temp_db):
+    """Worker A's lease expires; Worker B reclaims. Stale Worker A cannot record success/failure/unknown or release."""
+    store = AnalysisStore(db_path=temp_db)
+
+    # Worker A claims at t0
+    t0 = "2026-10-28T10:00:00+00:00"
+    claimed_a, _, rec_a = store.claim_notification_dispatch(
+        owner="octocat",
+        repository="Hello-World",
+        pr_number=42,
+        head_sha=VALID_HEAD_SHA,
+        now_iso=t0,
+        ttl_seconds=60,
+    )
+    assert claimed_a is True
+    claim_id_a = rec_a["claim_id"]
+    assert claim_id_a is not None and claim_id_a.startswith("clm_")
+
+    # Worker A's lease expires at t0 + 65s. Worker B reclaims.
+    t1 = "2026-10-28T10:01:05+00:00"
+    claimed_b, _, rec_b = store.claim_notification_dispatch(
+        owner="octocat",
+        repository="Hello-World",
+        pr_number=42,
+        head_sha=VALID_HEAD_SHA,
+        now_iso=t1,
+        ttl_seconds=60,
+    )
+    assert claimed_b is True
+    claim_id_b = rec_b["claim_id"]
+    assert claim_id_b != claim_id_a
+    assert rec_b["attempts"] == 2
+
+    # Worker A returns late and attempts to release the claim: rejected!
+    rel_a = store.release_notification_dispatch(
+        owner="octocat",
+        repository="Hello-World",
+        pr_number=42,
+        head_sha=VALID_HEAD_SHA,
+        claim_id=claim_id_a,
+    )
+    assert rel_a is False
+    # Worker B's active claim remains intact
+    cur = store.get_notification_dispatch("octocat", "Hello-World", 42, VALID_HEAD_SHA)
+    assert cur["status"] == "sending"
+    assert cur["claim_id"] == claim_id_b
+
+    # Worker A attempts to record failure with stale claim_id: rejected!
+    fail_a = store.record_notification_failure(
+        owner="octocat",
+        repository="Hello-World",
+        pr_number=42,
+        head_sha=VALID_HEAD_SHA,
+        claim_id=claim_id_a,
+        reason="stale_error",
+    )
+    assert fail_a is False
+
+    # Worker A attempts to record unknown with stale claim_id: rejected!
+    unk_a = store.record_notification_unknown(
+        owner="octocat",
+        repository="Hello-World",
+        pr_number=42,
+        head_sha=VALID_HEAD_SHA,
+        claim_id=claim_id_a,
+    )
+    assert unk_a is False
+
+    # Worker A attempts to record success with stale claim_id: rejected!
+    succ_a = store.record_notification_success(
+        owner="octocat",
+        repository="Hello-World",
+        pr_number=42,
+        head_sha=VALID_HEAD_SHA,
+        claim_id=claim_id_a,
+    )
+    assert succ_a is False
+
+    # Worker B records success with valid claim_id: accepted!
+    succ_b = store.record_notification_success(
+        owner="octocat",
+        repository="Hello-World",
+        pr_number=42,
+        head_sha=VALID_HEAD_SHA,
+        claim_id=claim_id_b,
+        status_code=200,
+    )
+    assert succ_b is True
+
+    final_rec = store.get_notification_dispatch("octocat", "Hello-World", 42, VALID_HEAD_SHA)
+    assert final_rec["status"] == "sent"
+
+
+def test_stale_failure_cannot_overwrite_confirmed_sent(temp_db):
+    """A delayed worker returning with failure or timeout cannot overwrite a terminal 'sent' record."""
+    store = AnalysisStore(db_path=temp_db)
+
+    # Initial claim and confirmed success
+    claimed, _, rec = store.claim_notification_dispatch(
+        owner="octocat",
+        repository="Hello-World",
+        pr_number=42,
+        head_sha=VALID_HEAD_SHA,
+    )
+    assert claimed is True
+    ok = store.record_notification_success(
+        owner="octocat",
+        repository="Hello-World",
+        pr_number=42,
+        head_sha=VALID_HEAD_SHA,
+        claim_id=rec["claim_id"],
+        status_code=200,
+    )
+    assert ok is True
+
+    # Delayed failure attempt
+    fail_ok = store.record_notification_failure(
+        owner="octocat",
+        repository="Hello-World",
+        pr_number=42,
+        head_sha=VALID_HEAD_SHA,
+        reason="delayed_worker_error",
+    )
+    assert fail_ok is False
+
+    # Delayed unknown attempt
+    unk_ok = store.record_notification_unknown(
+        owner="octocat",
+        repository="Hello-World",
+        pr_number=42,
+        head_sha=VALID_HEAD_SHA,
+        reason="delayed_timeout",
+    )
+    assert unk_ok is False
+
+    # Terminal record remains 'sent'
+    final_rec = store.get_notification_dispatch("octocat", "Hello-World", 42, VALID_HEAD_SHA)
+    assert final_rec["status"] == "sent"
+    assert final_rec["last_reason"] == "delivered"
+
+
+def test_concurrent_reclamation_race_produces_single_winner(temp_db):
+    """Two workers concurrently attempting to reclaim the same expired lease results in exactly one winner."""
+    store = AnalysisStore(db_path=temp_db)
+
+    # Claim at t0
+    t0 = "2026-10-28T10:00:00+00:00"
+    store.claim_notification_dispatch(
+        owner="octocat",
+        repository="Hello-World",
+        pr_number=42,
+        head_sha=VALID_HEAD_SHA,
+        now_iso=t0,
+        ttl_seconds=60,
+    )
+
+    # Lease expires at t0 + 70s. Both workers race to reclaim.
+    t_reclaim = "2026-10-28T10:01:10+00:00"
+    results = []
+
+    def worker_reclaim(worker_id: int):
+        s = AnalysisStore(db_path=temp_db)
+        claimed, reason, rec = s.claim_notification_dispatch(
+            owner="octocat",
+            repository="Hello-World",
+            pr_number=42,
+            head_sha=VALID_HEAD_SHA,
+            now_iso=t_reclaim,
+            ttl_seconds=60,
+        )
+        results.append((worker_id, claimed, reason, rec))
+
+    threads = [threading.Thread(target=worker_reclaim, args=(i,)) for i in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Exactly one thread should win
+    winners = [r for r in results if r[1] is True]
+    losers = [r for r in results if r[1] is False]
+    assert len(winners) == 1
+    assert len(losers) == 4
+    assert winners[0][2] == "claimed"
+
+    rec = store.get_notification_dispatch("octocat", "Hello-World", 42, VALID_HEAD_SHA)
+    assert rec["attempts"] == 2
+
+
+def test_slack_http_200_with_persistence_failure_surfaces_uncertainty_and_protects_claim(temp_db, monkeypatch):
+    """When Slack HTTP 200 succeeds but persistence fails: status is 'uncertain', claim is NOT deleted."""
+    monkeypatch.setattr(settings, "SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/TEST/1/2")
+    monkeypatch.setattr("backend.github.orchestrator.send_slack_pr_alert_sync", lambda *a, **k: {"status": "delivered", "status_code": 200})
+    monkeypatch.setattr("backend.github.orchestrator.acquire_pull_request", lambda *a, **k: MagicMock(changed_files=[]))
+    monkeypatch.setattr("backend.github.orchestrator.publish_step_6o_report_status", lambda *a, **k: {"check_run": {"id": 1}, "commit_status": {"state": "success"}})
+    monkeypatch.setattr("backend.github.orchestrator.post_pr_security_comment", lambda *a, **k: {"status": "created"})
+
+    # Mock record_notification_success to simulate a persistence failure (returns False)
+    real_store = AnalysisStore(db_path=temp_db)
+    monkeypatch.setattr(AnalysisStore, "record_notification_success", lambda *a, **k: False)
+
+    payload = _make_valid_pr_payload()
+    res = orchestrate_webhook_event("pull_request", "deliv-persist-fail-test", payload, db_path=temp_db)
+
+    # Surfaces uncertain delivery
+    assert res["status"] == "success"
+    assert res["slack_notification"]["status"] == "uncertain"
+    assert res["slack_notification"]["reason"] == "delivered_but_persistence_failed"
+    assert res["slack_notification"]["status_code"] == 200
+
+    # Claim must NOT have been deleted from the database
+    rec = real_store.get_notification_dispatch("octocat", "Hello-World", 42, VALID_HEAD_SHA)
+    assert rec is not None
+    assert rec["status"] == "sending"
+
+    # Subsequent claim attempt detects in_progress and does NOT trigger duplicate send
+    claimed2, reason2, _ = real_store.claim_notification_dispatch(
+        owner="octocat",
+        repository="Hello-World",
+        pr_number=42,
+        head_sha=VALID_HEAD_SHA,
+    )
+    assert claimed2 is False
+    assert reason2 == "in_progress"
+
+
+def test_retry_bounds_enforced_across_expired_leases(temp_db):
+    """Reclamation across repeated expirations respects MAX_NOTIFICATION_ATTEMPTS."""
+    store = AnalysisStore(db_path=temp_db)
+
+    times = [
+        "2026-10-28T10:00:00+00:00",
+        "2026-10-28T10:01:05+00:00",
+        "2026-10-28T10:02:10+00:00",
+        "2026-10-28T10:03:15+00:00",
+    ]
+
+    # Attempt 1
+    c1, r1, _ = store.claim_notification_dispatch("octocat", "Hello-World", 42, VALID_HEAD_SHA, now_iso=times[0], ttl_seconds=60)
+    assert c1 is True and r1 == "claimed"
+
+    # Attempt 2
+    c2, r2, _ = store.claim_notification_dispatch("octocat", "Hello-World", 42, VALID_HEAD_SHA, now_iso=times[1], ttl_seconds=60)
+    assert c2 is True and r2 == "claimed"
+
+    # Attempt 3
+    c3, r3, _ = store.claim_notification_dispatch("octocat", "Hello-World", 42, VALID_HEAD_SHA, now_iso=times[2], ttl_seconds=60)
+    assert c3 is True and r3 == "claimed"
+
+    # Attempt 4: Max attempts reached!
+    c4, r4, _ = store.claim_notification_dispatch("octocat", "Hello-World", 42, VALID_HEAD_SHA, now_iso=times[3], ttl_seconds=60)
+    assert c4 is False
+    assert r4 == "max_attempts_exceeded"

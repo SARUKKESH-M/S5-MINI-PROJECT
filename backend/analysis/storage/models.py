@@ -263,6 +263,18 @@ DEFAULT_COMMIT_RESERVATION_TTL_SECONDS = 300  # 5 minutes bounded recovery
 DEFAULT_NOTIFICATION_DISPATCH_TTL_SECONDS = 60  # 60s lease window for in-flight sending
 MAX_NOTIFICATION_ATTEMPTS = 3  # Maximum retry attempts for transient errors
 
+# Delivery Uncertainty Note:
+# In distributed systems without two-phase commit across external webhooks (Slack)
+# and local ACID storage (SQLite), a crash between Slack HTTP 200 acceptance and local
+# persistence commit produces unavoidable delivery ambiguity. CodeSentinel enforces
+# strict claim fencing (claim_id) and conditional state transitions so stale workers
+# cannot overwrite newer claims or confirmed successes, but does not claim two-phase
+# exactly-once delivery across process crashes.
+NOTIFICATION_STATUS_SENDING = "sending"
+NOTIFICATION_STATUS_SENT = "sent"
+NOTIFICATION_STATUS_FAILED = "failed"
+NOTIFICATION_STATUS_UNKNOWN = "unknown"
+
 
 # ============================================================================
 # Phase A3: User & Access-Control Storage Models

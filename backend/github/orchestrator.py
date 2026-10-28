@@ -735,13 +735,14 @@ def orchestrate_webhook_event(
             # Dispatch optional Slack notification (Phase 3D-2C persistent deduplication)
             slack_res = None
             if send_slack_pr_alert_sync is not None:
+                current_claim_id = None
                 try:
                     active_store = store or _get_analysis_store(db_path=db_path)
                     notif_claimed = False
                     notif_reason = "store_unavailable"
 
                     if active_store is not None:
-                        notif_claimed, notif_reason, _ = active_store.claim_notification_dispatch(
+                        notif_claimed, notif_reason, claim_rec = active_store.claim_notification_dispatch(
                             owner=clean_owner,
                             repository=clean_repo,
                             pr_number=clean_pr_num,
@@ -749,6 +750,8 @@ def orchestrate_webhook_event(
                             notification_type="pr_security_gate",
                             analysis_id=report.get("analysis_id"),
                         )
+                        if isinstance(claim_rec, dict):
+                            current_claim_id = claim_rec.get("claim_id")
                     else:
                         notif_claimed = True
 
@@ -774,15 +777,30 @@ def orchestrate_webhook_event(
                         # Record outcome in persistent ledger
                         if active_store is not None:
                             if isinstance(slack_res, dict) and slack_res.get("status") == "delivered":
-                                active_store.record_notification_success(
-                                    owner=clean_owner,
-                                    repository=clean_repo,
-                                    pr_number=clean_pr_num,
-                                    head_sha=clean_head_sha,
-                                    notification_type="pr_security_gate",
-                                    analysis_id=report.get("analysis_id"),
-                                    status_code=slack_res.get("status_code", 200),
-                                )
+                                persist_ok = False
+                                try:
+                                    persist_ok = active_store.record_notification_success(
+                                        owner=clean_owner,
+                                        repository=clean_repo,
+                                        pr_number=clean_pr_num,
+                                        head_sha=clean_head_sha,
+                                        notification_type="pr_security_gate",
+                                        analysis_id=report.get("analysis_id"),
+                                        status_code=slack_res.get("status_code", 200),
+                                        claim_id=current_claim_id,
+                                    )
+                                except Exception:
+                                    persist_ok = False
+
+                                if not persist_ok:
+                                    # Slack HTTP 200 was received, but persistence or claim ownership verification failed.
+                                    # We do NOT release/delete the claim (which would cause duplicate dispatch).
+                                    # Explicitly surface delivery uncertainty:
+                                    slack_res = {
+                                        "status": "uncertain",
+                                        "reason": "delivered_but_persistence_failed",
+                                        "status_code": slack_res.get("status_code", 200),
+                                    }
                             elif isinstance(slack_res, dict) and slack_res.get("status") == "skipped":
                                 # Webhook not configured -> release claim so it doesn't linger in 'sending'
                                 active_store.release_notification_dispatch(
@@ -791,6 +809,7 @@ def orchestrate_webhook_event(
                                     pr_number=clean_pr_num,
                                     head_sha=clean_head_sha,
                                     notification_type="pr_security_gate",
+                                    claim_id=current_claim_id,
                                 )
                             elif isinstance(slack_res, dict) and slack_res.get("reason") == "timeout":
                                 active_store.record_notification_unknown(
@@ -801,6 +820,7 @@ def orchestrate_webhook_event(
                                     notification_type="pr_security_gate",
                                     reason="timeout",
                                     analysis_id=report.get("analysis_id"),
+                                    claim_id=current_claim_id,
                                 )
                             else:
                                 raw_code = slack_res.get("status_code") if isinstance(slack_res, dict) else None
@@ -814,6 +834,7 @@ def orchestrate_webhook_event(
                                     status_code=raw_code,
                                     reason=raw_fail_reason,
                                     analysis_id=report.get("analysis_id"),
+                                    claim_id=current_claim_id,
                                 )
                 except Exception as slack_err:
                     slack_res = {"status": "failed", "reason": f"unexpected_error_{type(slack_err).__name__}"}
@@ -825,6 +846,7 @@ def orchestrate_webhook_event(
                                 pr_number=clean_pr_num,
                                 head_sha=clean_head_sha,
                                 notification_type="pr_security_gate",
+                                claim_id=current_claim_id,
                             )
                         except Exception:
                             pass
