@@ -55,7 +55,11 @@ def get_language_for_extension(ext: str) -> Optional[str]:
     return SUPPORTED_EXTENSIONS.get(ext.lower())
 
 
-def discover_source_files(root_path: str, subpath: str = "") -> List[Dict[str, Any]]:
+def discover_source_files(
+    root_path: str,
+    subpath: str = "",
+    exclude_dirs: Optional[Set[str]] = None
+) -> List[Dict[str, Any]]:
     """
     Recursively discovers supported source files in root_path / subpath.
 
@@ -81,9 +85,11 @@ def discover_source_files(root_path: str, subpath: str = "") -> List[Dict[str, A
     discovered_files: List[Dict[str, Any]] = []
     total_bytes = 0
 
+    active_excluded_dirs = EXCLUDED_DIRECTORIES if exclude_dirs is None else (EXCLUDED_DIRECTORIES | set(exclude_dirs))
+
     for dirpath, dirnames, filenames in os.walk(target_dir):
         # Filter excluded directories in-place
-        dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRECTORIES and not d.startswith(".git")]
+        dirnames[:] = [d for d in dirnames if d not in active_excluded_dirs and not d.startswith(".git")]
 
         for filename in filenames:
             ext = os.path.splitext(filename)[1].lower()

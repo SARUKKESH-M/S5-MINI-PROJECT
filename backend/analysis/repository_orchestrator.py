@@ -86,49 +86,25 @@ def analyze_repository(
 
     analysis_id = f"repo_ana_{uuid.uuid4().hex[:12]}"
 
-    # 1. Prepare repository files & validate workspace boundaries
-    meta, raw_read_files, raw_file_stats = prepare_repository_analysis_files(
+    # 1. Prepare repository files with path-first filtering & validate workspace boundaries
+    meta, final_files, raw_file_stats = prepare_repository_analysis_files(
         acquisition_id=acquisition_id,
-        workspace_root=workspace_root
+        workspace_root=workspace_root,
+        custom_exclude_patterns=custom_exclude_patterns,
+        changed_files=changed_files,
+        strict_incremental=strict_incremental,
+        max_files=policy.max_files,
     )
 
     repo_info = meta["repository"]
     repo_dest_path = str(meta["acquisition"]["repo_path"])
-
-    # 2. Apply Scope Exclusion Rules
-    scope_included_files: List[Dict[str, Any]] = []
-    excluded_count = 0
-
-    for f_item in raw_read_files:
-        rel_p = f_item["path"]
-        if should_exclude_path(rel_p, custom_exclude_patterns=custom_exclude_patterns):
-            excluded_count += 1
-        else:
-            scope_included_files.append(f_item)
-
-    # 3. Apply Incremental Analysis Filtering
-    inc_included, inc_excluded, is_incremental = process_incremental_files(
-        changed_files=changed_files,
-        repo_root=repo_dest_path,
-        custom_exclude_patterns=custom_exclude_patterns,
-        strict_incremental=strict_incremental
-    )
-
-    if is_incremental:
-        inc_set = set(inc_included)
-        final_files = [f for f in scope_included_files if f["path"] in inc_set]
-    else:
-        final_files = scope_included_files
-
-    # Enforce policy max_files limit
-    if len(final_files) > policy.max_files:
-        final_files = final_files[:policy.max_files]
-
-    analyzed_count = sum(1 for f in final_files if not f["skipped"] and f["source_code"])
-    skipped_count = len(final_files) - analyzed_count
+    is_incremental = raw_file_stats.get("is_incremental", False)
+    excluded_count = raw_file_stats.get("files_excluded", 0)
+    analyzed_count = raw_file_stats.get("analyzed_files", 0)
+    skipped_count = raw_file_stats.get("skipped_files", 0)
 
     file_stats = {
-        "total_files": len(final_files),
+        "total_files": raw_file_stats.get("total_files", len(final_files)),
         "analyzed_files": analyzed_count,
         "skipped_files": skipped_count
     }
@@ -180,59 +156,61 @@ def analyze_repository(
         src = f_item["source_code"]
         path_str = f_item["path"]
 
-        # Cache check
-        if enable_cache:
-            content_hash = analysis_cache.compute_file_hash(src)
-            cache_key = analysis_cache.generate_cache_key(path_str, content_hash, policy.name)
-            cached_ast = analysis_cache.get(cache_key)
-            if cached_ast and "ast_docs" in cached_ast and "security_evidence" in cached_ast:
-                all_ast_docs.extend(cached_ast["ast_docs"])
-                all_security_evidence.extend(cached_ast["security_evidence"])
-                cache_hits += 1
-                metrics_collector.increment("cache_hits_total")
-                continue
-            else:
-                cache_misses += 1
-                metrics_collector.increment("cache_misses_total")
+        try:
+            # Cache check
+            if enable_cache:
+                content_hash = analysis_cache.compute_file_hash(src)
+                cache_key = analysis_cache.generate_cache_key(path_str, content_hash, policy.name)
+                cached_ast = analysis_cache.get(cache_key)
+                if cached_ast and "ast_docs" in cached_ast and "security_evidence" in cached_ast:
+                    all_ast_docs.extend(cached_ast["ast_docs"])
+                    all_security_evidence.extend(cached_ast["security_evidence"])
+                    cache_hits += 1
+                    metrics_collector.increment("cache_hits_total")
+                    continue
+                else:
+                    cache_misses += 1
+                    metrics_collector.increment("cache_misses_total")
 
-        # Pass Python source files to AST engine
-        if f_item["language"] == "python":
-            try:
-                normalized_evidence = normalize_security_evidence(src, file_path=path_str)
-                security_evidence = normalized_evidence.get("security_evidence", [])
-                ast_docs = prepare_ast_documents_for_rag(src, file_path=path_str, normalized_evidence=normalized_evidence)
-                all_ast_docs.extend(ast_docs)
-                all_security_evidence.extend(security_evidence)
+            # Pass Python source files to AST engine
+            if f_item["language"] == "python":
+                try:
+                    normalized_evidence = normalize_security_evidence(src, file_path=path_str)
+                    security_evidence = normalized_evidence.get("security_evidence", [])
+                    ast_docs = prepare_ast_documents_for_rag(src, file_path=path_str, normalized_evidence=normalized_evidence)
+                    all_ast_docs.extend(ast_docs)
+                    all_security_evidence.extend(security_evidence)
 
-                if enable_cache:
-                    content_hash = analysis_cache.compute_file_hash(src)
-                    cache_key = analysis_cache.generate_cache_key(path_str, content_hash, policy.name)
-                    analysis_cache.set(cache_key, {"file_path": path_str, "ast_docs": ast_docs, "security_evidence": security_evidence})
-            except Exception:
-                # Malformed Python source must not crash the entire repository analysis
-                pass
-        elif f_item["language"] == "javascript":
-            try:
-                # Process JavaScript via Tree-Sitter structural analyzer
-                from ast_engine.structural_analyzer import analyze_javascript_structure
-                analyze_javascript_structure(src)
+                    if enable_cache:
+                        content_hash = analysis_cache.compute_file_hash(src)
+                        cache_key = analysis_cache.generate_cache_key(path_str, content_hash, policy.name)
+                        analysis_cache.set(cache_key, {"file_path": path_str, "ast_docs": ast_docs, "security_evidence": security_evidence})
+                except Exception:
+                    # Malformed Python source must not crash the entire repository analysis
+                    pass
+            elif f_item["language"] == "javascript":
+                try:
+                    # Process JavaScript via Tree-Sitter structural analyzer
+                    from ast_engine.structural_analyzer import analyze_javascript_structure
+                    analyze_javascript_structure(src)
 
-                # Process JavaScript via Tree-Sitter security analyzer
-                from ast_engine.javascript_security_analyzer import analyze_javascript_security_structure
-                sec_data = analyze_javascript_security_structure(src, file_path=path_str)
-                js_security_evidence = sec_data.get("security_signals", [])
-                all_security_evidence.extend(js_security_evidence)
-            except Exception:
-                # Malformed JavaScript source must not crash the entire repository analysis
-                pass
+                    # Process JavaScript via Tree-Sitter security analyzer
+                    from ast_engine.javascript_security_analyzer import analyze_javascript_security_structure
+                    sec_data = analyze_javascript_security_structure(src, file_path=path_str)
+                    js_security_evidence = sec_data.get("security_signals", [])
+                    all_security_evidence.extend(js_security_evidence)
+                except Exception:
+                    # Malformed JavaScript source must not crash the entire repository analysis
+                    pass
+        finally:
+            # Mandatory requirement 6: release source_code immediately on cache hits, parse success, and exceptions
+            f_item["source_code"] = None
 
     # 5. Generate deterministic findings from all extracted AST security evidence FIRST
     # Deterministic AST rules are strictly authoritative; RAG and LLM operate advisory only.
     raw_findings = generate_deterministic_findings(all_security_evidence)
 
-    # Explicitly release large raw file collections that are no longer required
-    del raw_read_files
-    del scope_included_files
+    # Explicitly release final_files collection when no longer needed
     del final_files
     gc.collect()
 
@@ -299,7 +277,7 @@ def analyze_repository(
     trace_meta = build_analysis_traceability_metadata(
         policy_name=policy.name,
         is_incremental=is_incremental,
-        files_considered=raw_file_stats["total_files"],
+        files_considered=raw_file_stats.get("files_considered", raw_file_stats.get("total_files", 0)),
         files_analyzed=analyzed_count,
         files_excluded=excluded_count,
         cache_hits=cache_hits,
