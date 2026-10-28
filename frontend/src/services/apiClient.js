@@ -179,10 +179,11 @@ export async function apiGet(endpoint, params = null, options = {}) {
  * @param {any} [body] Object payload to serialize as JSON
  * @returns {Promise<any>}
  */
-export async function apiPost(endpoint, body = null) {
+export async function apiPost(endpoint, body = null, options = {}) {
   return apiFetch(endpoint, {
     method: 'POST',
     body: body ? JSON.stringify(body) : undefined,
+    ...options,
   });
 }
 
@@ -191,12 +192,14 @@ export async function apiPost(endpoint, body = null) {
  * 
  * @param {string} endpoint 
  * @param {any} [body] Object payload to serialize as JSON
+ * @param {RequestInit & { timeout?: number }} [options] Additional fetch options
  * @returns {Promise<any>}
  */
-export async function apiPatch(endpoint, body = null) {
+export async function apiPatch(endpoint, body = null, options = {}) {
   return apiFetch(endpoint, {
     method: 'PATCH',
     body: body ? JSON.stringify(body) : undefined,
+    ...options,
   });
 }
 
@@ -204,10 +207,11 @@ export async function apiPatch(endpoint, body = null) {
  * Perform a DELETE request.
  * 
  * @param {string} endpoint 
+ * @param {RequestInit & { timeout?: number }} [options] Additional fetch options
  * @returns {Promise<any>}
  */
-export async function apiDelete(endpoint) {
-  return apiFetch(endpoint, { method: 'DELETE' });
+export async function apiDelete(endpoint, options = {}) {
+  return apiFetch(endpoint, { method: 'DELETE', ...options });
 }
 
 // ---------------------------------------------------------------------------
@@ -220,33 +224,33 @@ export async function getHealth() {
 }
 
 /** Comprehensive platform health check and component diagnostics (GET /platform/health) */
-export async function getPlatformHealth() {
-  return apiGet('/platform/health');
+export async function getPlatformHealth(options = {}) {
+  return apiGet('/platform/health', null, options);
 }
 
 /** Platform operational readiness check (GET /platform/readiness) */
-export async function getPlatformReadiness() {
-  return apiGet('/platform/readiness');
+export async function getPlatformReadiness(options = {}) {
+  return apiGet('/platform/readiness', null, options);
 }
 
 /** Platform 6-series release readiness verification (GET /platform/readiness/release) */
-export async function getPlatformReleaseReadiness() {
-  return apiGet('/platform/readiness/release');
+export async function getPlatformReleaseReadiness(options = {}) {
+  return apiGet('/platform/readiness/release', null, options);
 }
 
 /** Platform capabilities and version info (GET /platform/info) */
-export async function getPlatformInfo() {
-  return apiGet('/platform/info');
+export async function getPlatformInfo(options = {}) {
+  return apiGet('/platform/info', null, options);
 }
 
 /** Platform security policy profiles (GET /platform/policies) */
-export async function getPlatformPolicies() {
-  return apiGet('/platform/policies');
+export async function getPlatformPolicies(options = {}) {
+  return apiGet('/platform/policies', null, options);
 }
 
 /** Platform structured telemetry and observability metrics (GET /platform/metrics) */
-export async function getPlatformMetrics() {
-  return apiGet('/platform/metrics');
+export async function getPlatformMetrics(options = {}) {
+  return apiGet('/platform/metrics', null, options);
 }
 
 // ---------------------------------------------------------------------------
@@ -256,42 +260,46 @@ export async function getPlatformMetrics() {
 /**
  * Retrieve paginated list of historical security analyses (GET /analyses)
  * 
- * @param {Object} [options]
- * @param {number} [options.limit=20]
- * @param {number} [options.offset=0]
+ * @param {Object} [params]
+ * @param {number} [params.limit=20]
+ * @param {number} [params.offset=0]
+ * @param {RequestInit & { timeout?: number }} [options]
  */
-export async function getAnalyses({ limit = 20, offset = 0 } = {}) {
-  return apiGet('/analyses', { limit, offset });
+export async function getAnalyses({ limit = 20, offset = 0 } = {}, options = {}) {
+  return apiGet('/analyses', { limit, offset }, options);
 }
 
 /**
  * Retrieve a single historical analysis report by ID (GET /analyses/{analysis_id})
  * 
  * @param {string} analysisId 
+ * @param {RequestInit & { timeout?: number }} [options]
  */
-export async function getAnalysis(analysisId) {
+export async function getAnalysis(analysisId, options = {}) {
   if (!analysisId) throw new Error('analysisId is required');
-  return apiGet(`/analyses/${encodeURIComponent(analysisId)}`);
+  return apiGet(`/analyses/${encodeURIComponent(analysisId)}`, null, options);
 }
 
 /**
  * Retrieve findings for a specific analysis (GET /analyses/{analysis_id}/findings)
  * 
  * @param {string} analysisId 
+ * @param {RequestInit & { timeout?: number }} [options]
  */
-export async function getAnalysisFindings(analysisId) {
+export async function getAnalysisFindings(analysisId, options = {}) {
   if (!analysisId) throw new Error('analysisId is required');
-  return apiGet(`/analyses/${encodeURIComponent(analysisId)}/findings`);
+  return apiGet(`/analyses/${encodeURIComponent(analysisId)}/findings`, null, options);
 }
 
 /**
  * Delete a specific analysis record (DELETE /analyses/{analysis_id})
  * 
  * @param {string} analysisId 
+ * @param {RequestInit & { timeout?: number }} [options]
  */
-export async function deleteAnalysis(analysisId) {
+export async function deleteAnalysis(analysisId, options = {}) {
   if (!analysisId) throw new Error('analysisId is required');
-  return apiDelete(`/analyses/${encodeURIComponent(analysisId)}`);
+  return apiDelete(`/analyses/${encodeURIComponent(analysisId)}`, options);
 }
 
 // ---------------------------------------------------------------------------
@@ -306,9 +314,10 @@ export async function deleteAnalysis(analysisId) {
  * @param {string} [payload.branch='main']
  * @param {string} [payload.path='']
  * @param {string} [payload.local_path]
+ * @param {RequestInit & { timeout?: number }} [options]
  */
-export async function intakeRepository(payload) {
-  return apiPost('/repository/intake', payload);
+export async function intakeRepository(payload, options = {}) {
+  return apiPost('/repository/intake', payload, options);
 }
 
 /**
@@ -319,9 +328,10 @@ export async function intakeRepository(payload) {
  * @param {string} [payload.branch='main']
  * @param {string} [payload.path='']
  * @param {string} [payload.local_path]
+ * @param {RequestInit & { timeout?: number }} [options]
  */
-export async function acquireRepository(payload) {
-  return apiPost('/repository/acquire', payload);
+export async function acquireRepository(payload, options = {}) {
+  return apiPost('/repository/acquire', payload, options);
 }
 
 /**
@@ -330,9 +340,10 @@ export async function acquireRepository(payload) {
  * @param {Object} payload
  * @param {string} payload.acquisition_id
  * @param {string} [payload.query='security analysis']
+ * @param {RequestInit & { timeout?: number }} [options]
  */
-export async function analyzeRepository(payload) {
-  return apiPost('/repository/analyze', payload);
+export async function analyzeRepository(payload, options = {}) {
+  return apiPost('/repository/analyze', payload, options);
 }
 
 // ---------------------------------------------------------------------------
@@ -345,9 +356,10 @@ export async function analyzeRepository(payload) {
  * @param {Object} payload
  * @param {string} payload.source_code
  * @param {string} [payload.query='security analysis']
+ * @param {RequestInit & { timeout?: number }} [options]
  */
-export async function analyzeSourceCode(payload) {
-  return apiPost('/analyze', payload);
+export async function analyzeSourceCode(payload, options = {}) {
+  return apiPost('/analyze', payload, options);
 }
 
 // ---------------------------------------------------------------------------
@@ -471,11 +483,11 @@ export async function getVulnerabilityAnalytics({ timeWindow = '30d', repository
  * @param {number} [options.limit=20] Bounded results count (1-100)
  * @returns {Promise<any>}
  */
-export async function getRepositoryAnalytics({ timeWindow = '30d', limit = 20 } = {}) {
+export async function getRepositoryAnalytics({ timeWindow = '30d', limit = 20 } = {}, options = {}) {
   const params = {};
   if (timeWindow) params.time_window = timeWindow;
   if (limit) params.limit = limit;
-  return apiGet('/analytics/repositories', params);
+  return apiGet('/analytics/repositories', params, options);
 }
 
 /**

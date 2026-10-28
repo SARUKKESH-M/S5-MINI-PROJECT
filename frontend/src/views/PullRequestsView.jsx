@@ -73,11 +73,25 @@ export default function PullRequestsView() {
   const [quickBranch, setQuickBranch] = useState('main');
   const [scanFormError, setScanFormError] = useState(null);
 
-  // Double-submission protection ref
+  // Double-submission and lifecycle refs
   const isSubmittingRef = useRef(false);
+  const isMountedRef = useRef(true);
+  const abortControllerRef = useRef(null);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort('Component unmounted');
+        abortControllerRef.current = null;
+      }
+    };
+  }, []);
 
   // Load all analyses and filter for PR records
   const loadPrData = async () => {
+    if (!isMountedRef.current) return;
     setLoading(true);
     setError(null);
     try {
@@ -86,6 +100,8 @@ export default function PullRequestsView() {
         getPlatformInfo(),
         getPlatformHealth(),
       ]);
+
+      if (!isMountedRef.current) return;
 
       if (infoRes.status === 'fulfilled' && infoRes.value) {
         setPlatformInfo(infoRes.value);
@@ -141,9 +157,12 @@ export default function PullRequestsView() {
         setPrAnalyses([]);
       }
     } catch (err) {
+      if (!isMountedRef.current) return;
       setError(sanitizeErrorMessage(err.message || 'Failed to retrieve Pull Request records.'));
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -169,17 +188,22 @@ export default function PullRequestsView() {
 
     if (selectedPrId === analysisId && selectedPrDetail) return;
 
+    if (!isMountedRef.current) return;
     setSelectedPrId(analysisId);
     setDetailLoading(true);
     setDetailError(null);
 
     try {
       const res = await getAnalysis(analysisId);
+      if (!isMountedRef.current) return;
       setSelectedPrDetail(res.analysis || res);
     } catch (err) {
+      if (!isMountedRef.current) return;
       setDetailError(sanitizeErrorMessage(err.message || 'Failed to load Pull Request details.'));
     } finally {
-      setDetailLoading(false);
+      if (isMountedRef.current) {
+        setDetailLoading(false);
+      }
     }
   };
 
@@ -437,13 +461,27 @@ export default function PullRequestsView() {
           </div>
 
           {error && (
-            <div className="alert-box alert-error" style={{ marginBottom: '14px' }} role="alert">
-              <div>{error}</div>
+            <div className="alert-box alert-error" style={{ marginBottom: '14px' }} role="alert" aria-live="assertive">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', flexWrap: 'wrap', gap: '8px' }}>
+                <div>{error}</div>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={loadPrData}
+                  style={{ flexShrink: 0 }}
+                >
+                  ↻ Retry
+                </button>
+              </div>
             </div>
           )}
 
           {loading ? (
-            <div style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: '13px' }}>
+            <div
+              role="status"
+              aria-live="polite"
+              style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: '13px' }}
+            >
               Loading Pull Request records...
             </div>
           ) : filteredPrs.length === 0 ? (
@@ -611,12 +649,26 @@ export default function PullRequestsView() {
               </p>
             </div>
           ) : detailLoading ? (
-            <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+            <div
+              role="status"
+              aria-live="polite"
+              style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}
+            >
               Loading Pull Request analysis details...
             </div>
           ) : detailError ? (
-            <div className="alert-box alert-error" role="alert">
-              <div>{detailError}</div>
+            <div className="alert-box alert-error" role="alert" aria-live="assertive">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', flexWrap: 'wrap', gap: '8px' }}>
+                <div>{detailError}</div>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => handleSelectPr(selectedPrId, false)}
+                  style={{ flexShrink: 0 }}
+                >
+                  ↻ Retry Detail Fetch
+                </button>
+              </div>
             </div>
           ) : activePrMeta ? (
             <div>

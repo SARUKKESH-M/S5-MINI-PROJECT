@@ -1,9 +1,10 @@
 import React from 'react';
+import { Link } from 'react-router-dom';
 import { ShieldLogo } from './Icons';
 
 export default function Footer() {
   return (
-    <footer className="cs-dashboard-footer">
+    <footer className="cs-dashboard-footer" aria-label="Dashboard Footer">
       <div className="cs-footer-left">
         <div className="cs-footer-brand">
           <ShieldLogo size={20} />
@@ -14,9 +15,9 @@ export default function Footer() {
       </div>
 
       <div className="cs-footer-center">
-        <a href="#about" onClick={(e) => e.preventDefault()} className="cs-footer-link">About</a>
-        <a href="#docs" onClick={(e) => e.preventDefault()} className="cs-footer-link">Documentation</a>
-        <a href="#support" onClick={(e) => e.preventDefault()} className="cs-footer-link">Support</a>
+        <Link to="/system" className="cs-footer-link">System Diagnostics</Link>
+        <Link to="/tools" className="cs-footer-link">Operational Tools</Link>
+        <Link to="/history" className="cs-footer-link">Audit History</Link>
         <a
           href="https://github.com/SARUKKESH-M/S5-MINI-PROJECT"
           target="_blank"

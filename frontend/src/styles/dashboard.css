@@ -3324,3 +3324,133 @@ textarea {
   outline: 2px solid #6366F1;
   outline-offset: 1px;
 }
+
+/* ==========================================================================
+   Theme Support & Variables ([data-theme="dark"] / [data-theme="light"])
+   ========================================================================== */
+[data-theme="dark"] {
+  --bg-card: #0F141C;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-default: rgba(255, 255, 255, 0.14);
+  --text-primary: #F8FAFC;
+  --text-secondary: #CBD5E1;
+  --text-muted: #8392A5;
+  --text-dim: #506176;
+  --bg-void: #090C10;
+  --bg-surface: #0F141C;
+  --bg-surface-elevated: #161D28;
+  --bg-surface-hover: #1E2736;
+}
+
+[data-theme="dark"] .cs-app-layout {
+  background-color: #090C10;
+  color: #F8FAFC;
+}
+
+[data-theme="dark"] .cs-top-header {
+  background-color: #0F141C;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+[data-theme="dark"] .cs-header-search-input {
+  background-color: #161D28;
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #F8FAFC;
+}
+
+[data-theme="dark"] .cs-header-icon-btn,
+[data-theme="dark"] .cs-mobile-menu-btn {
+  background-color: #161D28;
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #94A3B8;
+}
+
+[data-theme="dark"] .cs-header-search-results,
+[data-theme="dark"] .cs-notifications-popover,
+[data-theme="dark"] .cs-profile-dropdown {
+  background-color: #0F141C !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+  color: #F8FAFC !important;
+}
+
+[data-theme="dark"] .cs-dropdown-item {
+  color: #CBD5E1;
+}
+
+[data-theme="dark"] .cs-dropdown-item:hover {
+  background-color: #161D28;
+  color: #F8FAFC;
+}
+
+[data-theme="dark"] .card,
+[data-theme="dark"] .cs-analytics-card,
+[data-theme="dark"] .cs-recent-table-card,
+[data-theme="dark"] .cs-metric-card,
+[data-theme="dark"] .cs-latest-panel-card,
+[data-theme="dark"] .cs-hero-banner {
+  background-color: #0F141C;
+  border-color: rgba(255, 255, 255, 0.08);
+  color: #F8FAFC;
+}
+
+[data-theme="dark"] .cs-metric-card-value {
+  color: #F8FAFC;
+}
+
+[data-theme="dark"] .cs-table-header th {
+  background-color: #161D28;
+  color: #94A3B8;
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+[data-theme="dark"] .cs-table-row {
+  border-bottom-color: rgba(255, 255, 255, 0.06);
+}
+
+[data-theme="dark"] .cs-table-row:hover {
+  background-color: #161D28;
+}
+
+[data-theme="dark"] .cs-dashboard-footer {
+  background-color: #0F141C;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Sidebar Live Status Dot Variants */
+.cs-status-indicator-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+  transition: background-color 0.2s ease;
+}
+
+.cs-status-indicator-dot.cs-health-healthy {
+  background-color: #10B981 !important;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
+}
+
+.cs-status-indicator-dot.cs-health-degraded {
+  background-color: #F59E0B !important;
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
+}
+
+.cs-status-indicator-dot.cs-health-checking {
+  background-color: #64748B !important;
+}
+
+.cs-status-indicator-dot.cs-health-offline,
+.cs-status-indicator-dot.cs-health-unavailable {
+  background-color: #EF4444 !important;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.4);
+}
+
+/* Accessible focus-visible for FindingCard expand trigger */
+.cs-finding-expand-trigger:focus-visible {
+  outline: 2px solid #6366F1 !important;
+  outline-offset: 2px !important;
+  border-radius: 4px;
+}
+
+

@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import StatusBadge from './StatusBadge';
+import { getFindingTaxonomy, getRemediationGuidance } from '../utils/securityTaxonomy';
 
-export default function FindingCard({ finding, index, onInspect }) {
+const FindingCard = React.memo(function FindingCard({ finding, index, onInspect }) {
   const [expanded, setExpanded] = useState(true);
 
   if (!finding) return null;
@@ -12,40 +13,29 @@ export default function FindingCard({ finding, index, onInspect }) {
   const description = finding.description || null;
   const filePath = finding.file_path || finding.file || null;
 
-  // Extract line number from line_number, line, or evidence array
-  const firstEvidence = Array.isArray(finding.evidence) && finding.evidence.length > 0 ? finding.evidence[0] : null;
+  // Grounded taxonomy resolution (memoized via WeakMap in securityTaxonomy)
+  const taxonomy = getFindingTaxonomy(finding);
+
+  // Extract primary line number from line_number, line, or evidence array
+  const rawEvidence = Array.isArray(finding.evidence) ? finding.evidence : [];
+  const firstEvidence = rawEvidence.length > 0 ? rawEvidence[0] : null;
   const lineNumber = finding.line_number ?? finding.line ?? firstEvidence?.line_start ?? null;
 
-  // Extract AST signal from explicit field or evidence object
+  // Extract primary AST signal from explicit field or evidence object
   const astSignal = finding.ast_signal || (
     firstEvidence?.signal_name
       ? `${firstEvidence.signal_name}${firstEvidence.signal_type ? ` (${firstEvidence.signal_type})` : ''}`
-      : null
+      : (firstEvidence?.signal_type || null)
   );
 
-  // Safely normalize codeSnippet / evidence to string to prevent object rendering crash
-  let evidenceDisplay = null;
-  if (typeof finding.code_snippet === 'string' && finding.code_snippet.trim()) {
-    evidenceDisplay = finding.code_snippet;
-  } else if (Array.isArray(finding.evidence) && finding.evidence.length > 0) {
-    evidenceDisplay = finding.evidence.map((ev) => {
-      if (typeof ev === 'string') return ev;
-      if (typeof ev === 'object' && ev !== null) {
-        const parts = [];
-        if (ev.line_start) {
-          parts.push(`Line ${ev.line_start}${ev.line_end && ev.line_end !== ev.line_start ? `-${ev.line_end}` : ''}`);
-        }
-        if (ev.signal_name) parts.push(`Signal: ${ev.signal_name}`);
-        if (ev.signal_type) parts.push(`Type: ${ev.signal_type}`);
-        return parts.length > 0 ? parts.join(' | ') : JSON.stringify(ev);
-      }
-      return String(ev);
-    }).join('\n');
-  } else if (typeof finding.evidence === 'string' && finding.evidence.trim()) {
-    evidenceDisplay = finding.evidence;
-  }
+  // Code snippet display if provided
+  const codeSnippet = typeof finding.code_snippet === 'string' && finding.code_snippet.trim()
+    ? finding.code_snippet.trim()
+    : null;
 
-  const remediation = finding.remediation || finding.recommendation || null;
+  // Authoritative remediation guidance
+  const remediationInfo = getRemediationGuidance(finding);
+
   const confidence = finding.confidence !== undefined ? (
     typeof finding.confidence === 'number'
       ? `${Math.round(finding.confidence * 100)}%`
@@ -62,18 +52,41 @@ export default function FindingCard({ finding, index, onInspect }) {
         border: '1px solid var(--border-default)',
       }}
     >
-      {/* Finding Header */}
+      {/* Finding Header Container (No nested interactive elements) */}
       <div
+        className="cs-finding-card-header"
         style={{
           display: 'flex',
-          alignItems: 'flex-start',
+          alignItems: 'center',
           justifyContent: 'space-between',
-          cursor: 'pointer',
+          flexWrap: 'wrap',
           gap: '12px',
         }}
-        onClick={() => setExpanded(!expanded)}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+        {/* Semantic Expand/Collapse Button Control */}
+        <button
+          type="button"
+          className="cs-finding-expand-trigger"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((prev) => !prev)}
+          aria-label={`${expanded ? 'Collapse' : 'Expand'} finding: ${title}`}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            padding: '4px 6px',
+            margin: '-4px -6px',
+            textAlign: 'left',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            flexWrap: 'wrap',
+            flex: '1 1 auto',
+            font: 'inherit',
+            color: 'inherit',
+            borderRadius: '4px',
+          }}
+        >
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-dim)' }}>
             #{index + 1}
           </span>
@@ -81,6 +94,45 @@ export default function FindingCard({ finding, index, onInspect }) {
           <h4 style={{ margin: 0, fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>
             {title}
           </h4>
+
+          {/* Mapped CWE Badge */}
+          {taxonomy.cweId && (
+            <span
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: '11px',
+                fontWeight: 600,
+                color: '#4F46E5',
+                backgroundColor: '#EEF2FF',
+                padding: '2px 6px',
+                borderRadius: '3px',
+                border: '1px solid #C7D2FE',
+              }}
+              title={taxonomy.cweName || taxonomy.cweId}
+            >
+              {taxonomy.cweId}
+            </span>
+          )}
+
+          {/* Mapped OWASP Category Badge */}
+          {taxonomy.owasp && (
+            <span
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: '10px',
+                color: 'var(--text-muted)',
+                backgroundColor: 'var(--bg-void)',
+                padding: '2px 6px',
+                borderRadius: '3px',
+                border: '1px solid var(--border-subtle)',
+              }}
+              title={taxonomy.owasp}
+            >
+              {taxonomy.owasp.split('-')[0]}
+            </span>
+          )}
+
+          {/* Raw Category */}
           {category && (
             <span
               style={{
@@ -96,9 +148,23 @@ export default function FindingCard({ finding, index, onInspect }) {
               {category}
             </span>
           )}
-        </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {/* Expand/Collapse Chevron Indicator */}
+          <span
+            style={{
+              color: 'var(--text-muted)',
+              fontSize: '12px',
+              padding: '0 4px',
+              marginLeft: 'auto',
+            }}
+            aria-hidden="true"
+          >
+            {expanded ? '▲' : '▼'}
+          </span>
+        </button>
+
+        {/* Independent Actions (Sibling controls, WCAG 4.1.2 compliant) */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
           {confidence && (
             <span style={{ fontSize: '11px', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
               CONF: {confidence}
@@ -108,23 +174,13 @@ export default function FindingCard({ finding, index, onInspect }) {
             <button
               type="button"
               className="btn btn-secondary btn-sm"
-              style={{ fontSize: '11px', padding: '2px 8px', color: '#4F46E5', borderColor: '#C7D2FE' }}
-              onClick={(e) => {
-                e.stopPropagation();
-                onInspect(finding);
-              }}
+              style={{ fontSize: '11px', padding: '4px 10px', color: '#4F46E5', borderColor: '#C7D2FE' }}
+              onClick={() => onInspect(finding)}
               aria-label={`Inspect details for ${title}`}
             >
               Inspect Details →
             </button>
           )}
-          <button
-            type="button"
-            style={{ color: 'var(--text-muted)', fontSize: '12px', padding: '2px 6px' }}
-            aria-label={expanded ? 'Collapse finding' : 'Expand finding'}
-          >
-            {expanded ? '▲' : '▼'}
-          </button>
         </div>
       </div>
 
@@ -140,16 +196,116 @@ export default function FindingCard({ finding, index, onInspect }) {
 
           {/* Description */}
           {description && (
-            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.5, margin: 0 }}>
               {description}
             </p>
           )}
 
-          {/* Code Snippet Evidence */}
-          {evidenceDisplay && (
+          {/* Structured AST Evidence Rows */}
+          {rawEvidence.length > 0 && (
             <div style={{ marginTop: '4px' }}>
-              <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                Code Evidence
+              <div
+                style={{
+                  fontSize: '11px',
+                  color: 'var(--text-muted)',
+                  marginBottom: '6px',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                  fontWeight: 600,
+                }}
+              >
+                Supporting AST Evidence ({rawEvidence.length} item{rawEvidence.length > 1 ? 's' : ''})
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {rawEvidence.map((ev, evIdx) => {
+                  if (typeof ev === 'string') {
+                    return (
+                      <div
+                        key={evIdx}
+                        style={{
+                          backgroundColor: 'var(--bg-void)',
+                          padding: '6px 10px',
+                          borderRadius: 'var(--radius-sm)',
+                          border: '1px solid var(--border-subtle)',
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: '11.5px',
+                          color: 'var(--text-secondary)',
+                        }}
+                      >
+                        {ev}
+                      </div>
+                    );
+                  }
+                  if (typeof ev === 'object' && ev !== null) {
+                    const lineText = ev.line_start
+                      ? `Lines ${ev.line_start}${ev.line_end && ev.line_end !== ev.line_start ? `-${ev.line_end}` : ''}`
+                      : null;
+                    const docId = ev.document_id || filePath || null;
+                    const sink = ev.signal_name || null;
+                    const sigType = ev.signal_type || null;
+
+                    return (
+                      <div
+                        key={evIdx}
+                        style={{
+                          backgroundColor: 'var(--bg-void)',
+                          padding: '8px 12px',
+                          borderRadius: 'var(--radius-sm)',
+                          border: '1px solid var(--border-subtle)',
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: '11.5px',
+                          display: 'flex',
+                          flexWrap: 'wrap',
+                          gap: '10px',
+                          alignItems: 'center',
+                        }}
+                      >
+                        {docId && (
+                          <span style={{ color: 'var(--accent-blue)', fontWeight: 600 }}>
+                            {docId}
+                          </span>
+                        )}
+                        {lineText && (
+                          <span style={{ color: 'var(--text-muted)' }}>
+                            {lineText}
+                          </span>
+                        )}
+                        {sink && (
+                          <span>
+                            <strong style={{ color: 'var(--text-secondary)' }}>Trigger Symbol:</strong>{' '}
+                            <code style={{ color: '#DC2626', backgroundColor: 'rgba(239, 68, 68, 0.08)', padding: '1px 4px', borderRadius: '2px' }}>
+                              {sink}
+                            </code>
+                          </span>
+                        )}
+                        {sigType && (
+                          <span style={{ color: 'var(--text-dim)', fontSize: '10.5px' }}>
+                            ({sigType})
+                          </span>
+                        )}
+                      </div>
+                    );
+                  }
+                  return null;
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Source Code Snippet Evidence (if available in finding) */}
+          {codeSnippet && (
+            <div style={{ marginTop: '4px' }}>
+              <div
+                style={{
+                  fontSize: '11px',
+                  color: 'var(--text-muted)',
+                  marginBottom: '4px',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                  fontWeight: 600,
+                }}
+              >
+                Code Snippet
               </div>
               <pre
                 style={{
@@ -161,22 +317,23 @@ export default function FindingCard({ finding, index, onInspect }) {
                   fontSize: '12px',
                   color: '#f43f5e',
                   overflowX: 'auto',
+                  margin: 0,
                 }}
               >
-                <code>{evidenceDisplay}</code>
+                <code>{codeSnippet}</code>
               </pre>
             </div>
           )}
 
-          {/* AST Signal */}
-          {astSignal && (
+          {/* AST Signal summary if rawEvidence was empty */}
+          {astSignal && rawEvidence.length === 0 && (
             <div style={{ fontSize: '12px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
               <strong style={{ color: 'var(--text-secondary)' }}>AST Signal:</strong> {astSignal}
             </div>
           )}
 
-          {/* Remediation */}
-          {remediation && (
+          {/* Authoritative Remediation Guidance */}
+          {remediationInfo && (
             <div
               style={{
                 backgroundColor: 'rgba(56, 189, 248, 0.08)',
@@ -186,16 +343,54 @@ export default function FindingCard({ finding, index, onInspect }) {
                 marginTop: '4px',
               }}
             >
-              <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--accent-blue)', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                Remediation
+              <div
+                style={{
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  color: 'var(--accent-blue)',
+                  marginBottom: '4px',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                }}
+              >
+                <span>Remediation Guidance</span>
+                {!remediationInfo.isSpecific && (
+                  <span
+                    style={{
+                      fontSize: '9.5px',
+                      color: 'var(--text-muted)',
+                      textTransform: 'none',
+                      fontWeight: 500,
+                    }}
+                  >
+                    (General Best Practice)
+                  </span>
+                )}
               </div>
-              <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                {remediation}
+              <div style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                {remediationInfo.text}
               </div>
+              {remediationInfo.disclaimer && (
+                <div
+                  style={{
+                    fontSize: '11px',
+                    color: 'var(--text-muted)',
+                    marginTop: '6px',
+                    fontStyle: 'italic',
+                  }}
+                >
+                  ℹ️ {remediationInfo.disclaimer}
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
     </div>
   );
-}
+});
+
+export default FindingCard;

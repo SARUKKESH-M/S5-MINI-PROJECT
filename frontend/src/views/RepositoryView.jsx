@@ -9,6 +9,9 @@ import {
 } from '../services/apiClient';
 import FindingCard from '../components/FindingCard';
 import StatusBadge from '../components/StatusBadge';
+import FindingsFilterBar from '../components/common/FindingsFilterBar';
+import FindingPreviewModal from '../components/dashboard/FindingPreviewModal';
+import { getFindingTaxonomy } from '../utils/securityTaxonomy';
 import { CodeFileIcon } from '../components/dashboard/Icons';
 
 /**
@@ -65,7 +68,7 @@ export default function RepositoryView() {
     }
   }, [location.state]);
 
-  // Flow stages: 'idle' | 'intaking' | 'intake_done' | 'acquiring' | 'acquired' | 'analyzing' | 'completed' | 'error'
+  // Flow stages: 'idle' | 'intaking' | 'intake_done' | 'acquiring' | 'acquired' | 'analyzing' | 'completed' | 'error' | 'cancelled' | 'timed-out'
   const [stage, setStage] = useState('idle');
   const [currentStep, setCurrentStep] = useState(0); // 0=idle, 1=intake, 2=acquire, 3=analyze, 4=verdict
   const [error, setError] = useState(null);
@@ -73,8 +76,26 @@ export default function RepositoryView() {
   const [acquisitionData, setAcquisitionData] = useState(null);
   const [analysisReport, setAnalysisReport] = useState(null);
 
-  // Duplicate submission protection ref
+  // Finding filters and inspection modal state
+  const [findingSearch, setFindingSearch] = useState('');
+  const [findingSeverity, setFindingSeverity] = useState('ALL');
+  const [selectedFinding, setSelectedFinding] = useState(null);
+
+  // Concurrency & lifecycle refs
   const isSubmittingRef = useRef(false);
+  const isMountedRef = useRef(true);
+  const abortControllerRef = useRef(null);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort('Component unmounted');
+        abortControllerRef.current = null;
+      }
+    };
+  }, []);
 
   // Monitored Repositories & Analytics state
   const [monitoredRepos, setMonitoredRepos] = useState([]);
@@ -85,6 +106,7 @@ export default function RepositoryView() {
 
   // Load monitored repositories and recent analyses from real backend
   const loadRepositoryIntelligence = async () => {
+    if (!isMountedRef.current) return;
     setReposLoading(true);
     setLoadError(null);
     try {
@@ -92,6 +114,8 @@ export default function RepositoryView() {
         getRepositoryAnalytics({ timeWindow: '30d' }),
         getAnalyses({ limit: 100 }),
       ]);
+
+      if (!isMountedRef.current) return;
 
       let hasSuccess = false;
       if (analyticsRes.status === 'fulfilled' && Array.isArray(analyticsRes.value?.repositories)) {
@@ -112,9 +136,12 @@ export default function RepositoryView() {
         setLoadError('Unable to retrieve monitored repository telemetry from backend. Please verify backend service.');
       }
     } catch (err) {
+      if (!isMountedRef.current) return;
       setLoadError(sanitizeErrorMessage(err.message || 'Failed to load repository telemetry.'));
     } finally {
-      setReposLoading(false);
+      if (isMountedRef.current) {
+        setReposLoading(false);
+      }
     }
   };
 
@@ -155,6 +182,36 @@ export default function RepositoryView() {
     return { isValid: true, message: null };
   };
 
+  // User-initiated operation cancellation
+  const handleCancelOperation = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort('Operation cancelled by user.');
+      abortControllerRef.current = null;
+    }
+    if (isMountedRef.current) {
+      setStage('cancelled');
+      setError('Repository operation was cancelled by the user.');
+      isSubmittingRef.current = false;
+    }
+  };
+
+  // Safe retry handler targeting current step
+  const handleRetryLastAction = () => {
+    if (currentStep === 1) {
+      handleValidateIntake();
+    } else if (currentStep === 2) {
+      handleAcquireWorkspace();
+    } else if (currentStep === 3) {
+      if (acquisitionData) {
+        handleAnalyzeAcquiredWorkspace();
+      } else {
+        handleAcquireAndAnalyze();
+      }
+    } else {
+      handleAcquireAndAnalyze();
+    }
+  };
+
   // 1. Validate Intake Only
   const handleValidateIntake = async () => {
     if (isSubmittingRef.current) return;
@@ -165,6 +222,12 @@ export default function RepositoryView() {
       return;
     }
 
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort('Superseded by new operation');
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     isSubmittingRef.current = true;
     setStage('intaking');
     setCurrentStep(1);
@@ -172,18 +235,34 @@ export default function RepositoryView() {
     setAnalysisReport(null);
 
     try {
-      const res = await intakeRepository({
-        repository_url: repoUrl.trim(),
-        branch: branch.trim() || 'main',
-        path: subpath.trim() || '',
-      });
+      const res = await intakeRepository(
+        {
+          repository_url: repoUrl.trim(),
+          branch: branch.trim() || 'main',
+          path: subpath.trim() || '',
+        },
+        { signal: controller.signal }
+      );
+      if (!isMountedRef.current) return;
       setIntakeData(res);
       setStage('intake_done');
     } catch (err) {
-      setError(sanitizeErrorMessage(err.message || 'Repository intake validation failed.'));
-      setStage('error');
+      if (!isMountedRef.current) return;
+      if (err.isAborted || err.name === 'AbortError') {
+        setStage('cancelled');
+        setError('Intake validation was cancelled.');
+      } else if (err.isTimeout || err.status === 408) {
+        setStage('timed-out');
+        setError('Intake validation timed out.');
+      } else {
+        setError(sanitizeErrorMessage(err.message || 'Repository intake validation failed.'));
+        setStage('error');
+      }
     } finally {
-      isSubmittingRef.current = false;
+      if (isMountedRef.current) {
+        isSubmittingRef.current = false;
+        abortControllerRef.current = null;
+      }
     }
   };
 
@@ -197,24 +276,46 @@ export default function RepositoryView() {
       return;
     }
 
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort('Superseded by new operation');
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     isSubmittingRef.current = true;
     setError(null);
     setStage('acquiring');
     setCurrentStep(2);
 
     try {
-      const acqRes = await acquireRepository({
-        repository_url: repoUrl.trim(),
-        branch: branch.trim() || 'main',
-        path: subpath.trim() || '',
-      });
+      const acqRes = await acquireRepository(
+        {
+          repository_url: repoUrl.trim(),
+          branch: branch.trim() || 'main',
+          path: subpath.trim() || '',
+        },
+        { signal: controller.signal }
+      );
+      if (!isMountedRef.current) return;
       setAcquisitionData(acqRes);
       setStage('acquired');
     } catch (err) {
-      setError(sanitizeErrorMessage(err.message || 'Repository acquisition failed.'));
-      setStage('error');
+      if (!isMountedRef.current) return;
+      if (err.isAborted || err.name === 'AbortError') {
+        setStage('cancelled');
+        setError('Workspace acquisition was cancelled.');
+      } else if (err.isTimeout || err.status === 408) {
+        setStage('timed-out');
+        setError('Workspace acquisition timed out.');
+      } else {
+        setError(sanitizeErrorMessage(err.message || 'Repository acquisition failed.'));
+        setStage('error');
+      }
     } finally {
-      isSubmittingRef.current = false;
+      if (isMountedRef.current) {
+        isSubmittingRef.current = false;
+        abortControllerRef.current = null;
+      }
     }
   };
 
@@ -228,6 +329,12 @@ export default function RepositoryView() {
       return;
     }
 
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort('Superseded by new operation');
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     isSubmittingRef.current = true;
     setError(null);
     setAnalysisReport(null);
@@ -235,19 +342,35 @@ export default function RepositoryView() {
     setCurrentStep(3);
 
     try {
-      const repRes = await analyzeRepository({
-        acquisition_id: acqId,
-        query: 'security analysis',
-      });
+      const repRes = await analyzeRepository(
+        {
+          acquisition_id: acqId,
+          query: 'security analysis',
+        },
+        { signal: controller.signal }
+      );
+      if (!isMountedRef.current) return;
       setCurrentStep(4);
       setAnalysisReport(repRes);
       setStage('completed');
       loadRepositoryIntelligence(); // refresh repository telemetry table
     } catch (err) {
-      setError(sanitizeErrorMessage(err.message || 'Repository analysis failed.'));
-      setStage('error');
+      if (!isMountedRef.current) return;
+      if (err.isAborted || err.name === 'AbortError') {
+        setStage('cancelled');
+        setError('Repository analysis was cancelled.');
+      } else if (err.isTimeout || err.status === 408) {
+        setStage('timed-out');
+        setError('Repository analysis timed out.');
+      } else {
+        setError(sanitizeErrorMessage(err.message || 'Repository analysis failed.'));
+        setStage('error');
+      }
     } finally {
-      isSubmittingRef.current = false;
+      if (isMountedRef.current) {
+        isSubmittingRef.current = false;
+        abortControllerRef.current = null;
+      }
     }
   };
 
@@ -261,6 +384,12 @@ export default function RepositoryView() {
       return;
     }
 
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort('Superseded by new operation');
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     isSubmittingRef.current = true;
     setError(null);
     setAnalysisReport(null);
@@ -269,21 +398,29 @@ export default function RepositoryView() {
       // Step 1: Intake
       setStage('intaking');
       setCurrentStep(1);
-      const inRes = await intakeRepository({
-        repository_url: repoUrl.trim(),
-        branch: branch.trim() || 'main',
-        path: subpath.trim() || '',
-      });
+      const inRes = await intakeRepository(
+        {
+          repository_url: repoUrl.trim(),
+          branch: branch.trim() || 'main',
+          path: subpath.trim() || '',
+        },
+        { signal: controller.signal }
+      );
+      if (!isMountedRef.current) return;
       setIntakeData(inRes);
 
       // Step 2: Acquire
       setStage('acquiring');
       setCurrentStep(2);
-      const acqRes = await acquireRepository({
-        repository_url: repoUrl.trim(),
-        branch: branch.trim() || 'main',
-        path: subpath.trim() || '',
-      });
+      const acqRes = await acquireRepository(
+        {
+          repository_url: repoUrl.trim(),
+          branch: branch.trim() || 'main',
+          path: subpath.trim() || '',
+        },
+        { signal: controller.signal }
+      );
+      if (!isMountedRef.current) return;
       setAcquisitionData(acqRes);
 
       const acqId = acqRes.acquisition_id || acqRes.acquisition?.acquisition_id;
@@ -294,10 +431,14 @@ export default function RepositoryView() {
       // Step 3: Analyze
       setStage('analyzing');
       setCurrentStep(3);
-      const repRes = await analyzeRepository({
-        acquisition_id: acqId,
-        query: 'security analysis',
-      });
+      const repRes = await analyzeRepository(
+        {
+          acquisition_id: acqId,
+          query: 'security analysis',
+        },
+        { signal: controller.signal }
+      );
+      if (!isMountedRef.current) return;
 
       // Step 4: Verdict
       setCurrentStep(4);
@@ -305,10 +446,22 @@ export default function RepositoryView() {
       setStage('completed');
       loadRepositoryIntelligence(); // refresh table with new analysis
     } catch (err) {
-      setError(sanitizeErrorMessage(err.message || 'Repository acquisition & analysis pipeline failed.'));
-      setStage('error');
+      if (!isMountedRef.current) return;
+      if (err.isAborted || err.name === 'AbortError') {
+        setStage('cancelled');
+        setError('Repository pipeline was cancelled.');
+      } else if (err.isTimeout || err.status === 408) {
+        setStage('timed-out');
+        setError('Repository pipeline timed out.');
+      } else {
+        setError(sanitizeErrorMessage(err.message || 'Repository acquisition & analysis pipeline failed.'));
+        setStage('error');
+      }
     } finally {
-      isSubmittingRef.current = false;
+      if (isMountedRef.current) {
+        isSubmittingRef.current = false;
+        abortControllerRef.current = null;
+      }
     }
   };
 
@@ -361,6 +514,33 @@ export default function RepositoryView() {
     (summary.critical_count > 0 || summary.high_count > 0) ? 'BLOCK' :
     (summary.medium_count > 0) ? 'REVIEW' : 'ALLOW'
   );
+
+  // Memoized client-side finding filters (grounded in actual API properties)
+  const filteredFindings = useMemo(() => {
+    if (!Array.isArray(findings)) return [];
+    return findings.filter((f) => {
+      // 1. Severity filter
+      if (findingSeverity !== 'ALL') {
+        const sev = String(f?.severity || 'info').toUpperCase();
+        if (sev !== findingSeverity) return false;
+      }
+      // 2. Text search filter (grounded in title, category, evidence file path, verified mapped CWE ID)
+      if (findingSearch && findingSearch.trim()) {
+        const q = findingSearch.trim().toLowerCase();
+        const title = String(f?.title || f?.name || '').toLowerCase();
+        const cat = String(f?.category || f?.rule_id || '').toLowerCase();
+        const rawEv = Array.isArray(f?.evidence) ? f.evidence : [];
+        const firstEv = rawEv.length > 0 ? rawEv[0] : null;
+        const docId = String(f?.file_path || f?.file || firstEv?.document_id || '').toLowerCase();
+        const taxonomy = getFindingTaxonomy(f);
+        const cwe = String(taxonomy?.cweId || '').toLowerCase();
+
+        const matches = title.includes(q) || cat.includes(q) || docId.includes(q) || cwe.includes(q);
+        if (!matches) return false;
+      }
+      return true;
+    });
+  }, [findings, findingSeverity, findingSearch]);
 
   // Monitored repository aggregate insights (Authoritative, strictly from SQLite)
   const repoInsights = useMemo(() => {
@@ -437,6 +617,8 @@ export default function RepositoryView() {
         {/* 4-Stage Stepper */}
         <div
           className="stepper-grid"
+          role="status"
+          aria-live="polite"
           style={{
             marginTop: '20px',
             padding: '12px 16px',
@@ -446,8 +628,24 @@ export default function RepositoryView() {
           }}
         >
           {steps.map((s) => {
-            const isActive = currentStep === s.num;
-            const isDone = currentStep > s.num || (currentStep === 4 && stage === 'completed');
+            const isFailed = currentStep === s.num && (stage === 'error' || stage === 'cancelled' || stage === 'timed-out');
+            const isActive = currentStep === s.num && isProcessing;
+            const isDone = (currentStep > s.num) || (currentStep === 4 && stage === 'completed');
+            const badgeBg = isFailed
+              ? 'var(--sev-critical)'
+              : isDone
+              ? '#10B981'
+              : isActive
+              ? '#6366F1'
+              : 'var(--bg-surface-elevated)';
+            const textColor = isFailed
+              ? 'var(--sev-critical)'
+              : isActive
+              ? '#6366F1'
+              : isDone
+              ? 'var(--text-primary)'
+              : 'var(--text-dim)';
+
             return (
               <div key={s.num} style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, overflow: 'hidden' }}>
                 <span
@@ -462,15 +660,11 @@ export default function RepositoryView() {
                     fontWeight: 700,
                     fontFamily: 'var(--font-mono)',
                     flexShrink: 0,
-                    backgroundColor: isDone
-                      ? '#10B981'
-                      : isActive
-                      ? '#6366F1'
-                      : 'var(--bg-surface-elevated)',
-                    color: isDone || isActive ? '#FFFFFF' : 'var(--text-muted)',
+                    backgroundColor: badgeBg,
+                    color: isDone || isActive || isFailed ? '#FFFFFF' : 'var(--text-muted)',
                   }}
                 >
-                  {isDone ? '✓' : s.num}
+                  {isFailed ? '!' : isDone ? '✓' : s.num}
                 </span>
                 <span
                   style={{
@@ -480,7 +674,7 @@ export default function RepositoryView() {
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                     whiteSpace: 'nowrap',
-                    color: isActive ? '#6366F1' : isDone ? 'var(--text-primary)' : 'var(--text-dim)',
+                    color: textColor,
                   }}
                 >
                   {s.label}
@@ -515,6 +709,10 @@ export default function RepositoryView() {
                   ? 'READY'
                   : stage === 'intake_done'
                   ? 'PASSED'
+                  : stage === 'cancelled'
+                  ? 'REVIEW'
+                  : stage === 'timed-out' || stage === 'error'
+                  ? 'BLOCK'
                   : isProcessing
                   ? 'REVIEW'
                   : 'INFO'
@@ -618,6 +816,18 @@ export default function RepositoryView() {
                 ? '⏳ Acquiring & Preparing...'
                 : '⚡ Acquire & Analyze'}
             </button>
+
+            {isProcessing && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleCancelOperation}
+                style={{ color: 'var(--sev-high)', borderColor: 'var(--border-subtle)', fontWeight: 600 }}
+                title="Cancel running operation"
+              >
+                ✕ Cancel
+              </button>
+            )}
           </div>
 
           <button
@@ -631,11 +841,25 @@ export default function RepositoryView() {
           </button>
         </div>
 
-        {/* Error Alert */}
+        {/* Actionable Error / Status Banner */}
         {error && (
-          <div id="cs-repo-error-banner" className="alert-box alert-error" role="alert" style={{ marginTop: '16px', marginBottom: 0 }}>
-            <div>
-              <strong>Error:</strong> {error}
+          <div id="cs-repo-error-banner" className="alert-box alert-error" role="alert" aria-live="assertive" style={{ marginTop: '16px', marginBottom: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', flexWrap: 'wrap', gap: '8px' }}>
+              <div>
+                <strong>
+                  {stage === 'cancelled' ? 'Operation Cancelled:' : stage === 'timed-out' ? 'Operation Timed Out:' : 'Error:'}
+                </strong>{' '}
+                {error}
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={handleRetryLastAction}
+                disabled={isProcessing}
+                style={{ flexShrink: 0 }}
+              >
+                ↻ Retry Step
+              </button>
             </div>
           </div>
         )}
@@ -711,7 +935,7 @@ export default function RepositoryView() {
                 </div>
               </div>
 
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
                 <StatusBadge
                   status={
                     latestAnalysisForCurrentRepo.review_status ||
@@ -745,7 +969,7 @@ export default function RepositoryView() {
               </h3>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
               <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>GATE VERDICT:</span>
               <StatusBadge status={verdict} size="large" />
               <button
@@ -788,16 +1012,65 @@ export default function RepositoryView() {
               Repository Findings ({findings.length})
             </div>
 
+            {findings.length > 0 && (
+              <FindingsFilterBar
+                findings={findings}
+                searchQuery={findingSearch}
+                onSearchChange={setFindingSearch}
+                severityFilter={findingSeverity}
+                onSeverityChange={setFindingSeverity}
+                onClearFilters={() => {
+                  setFindingSearch('');
+                  setFindingSeverity('ALL');
+                }}
+                matchingCount={filteredFindings.length}
+                totalCount={findings.length}
+              />
+            )}
+
             {findings.length === 0 ? (
               <div className="alert-box alert-success" style={{ margin: 0 }}>
                 <div>
                   <strong>No Vulnerabilities Detected:</strong> Scanned files in the workspace passed all security rules. Gate decision: <code>ALLOW</code>.
                 </div>
               </div>
+            ) : filteredFindings.length === 0 ? (
+              <div
+                className="card"
+                style={{
+                  padding: '24px 16px',
+                  textAlign: 'center',
+                  backgroundColor: 'var(--bg-surface-elevated)',
+                  border: '1px solid var(--border-default)',
+                }}
+              >
+                <div style={{ fontSize: '24px', marginBottom: '8px' }}>🔍</div>
+                <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px' }}>
+                  No Matching Findings
+                </div>
+                <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '0 0 12px' }}>
+                  No security findings match your active severity or text filters.
+                </p>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => {
+                    setFindingSearch('');
+                    setFindingSeverity('ALL');
+                  }}
+                >
+                  Clear Filters
+                </button>
+              </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {findings.map((f, idx) => (
-                  <FindingCard key={f.finding_id || idx} finding={f} index={idx} />
+                {filteredFindings.map((f, idx) => (
+                  <FindingCard
+                    key={f.finding_id || idx}
+                    finding={f}
+                    index={idx}
+                    onInspect={(finding) => setSelectedFinding(finding)}
+                  />
                 ))}
               </div>
             )}
@@ -1097,6 +1370,13 @@ export default function RepositoryView() {
           </div>
         </div>
       </div>
+
+      {/* Finding Detail Inspection Modal */}
+      <FindingPreviewModal
+        isOpen={Boolean(selectedFinding)}
+        onClose={() => setSelectedFinding(null)}
+        finding={selectedFinding}
+      />
     </div>
   );
 }

@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { CodeFileIcon } from './Icons';
 import StatusBadge from '../StatusBadge';
+import { getFindingTaxonomy, getRemediationGuidance } from '../../utils/securityTaxonomy';
 
 export default function FindingPreviewModal({
   isOpen = false,
@@ -74,8 +75,13 @@ export default function FindingPreviewModal({
   const category = finding.category || finding.rule_id || null;
   const findingId = finding.finding_id || null;
 
-  // Primary evidence extraction
-  const primaryEv = Array.isArray(finding.evidence) && finding.evidence.length > 0 ? finding.evidence[0] : null;
+  // Grounded taxonomy resolution (never guessed)
+  const taxonomy = getFindingTaxonomy(finding);
+  const remediationInfo = getRemediationGuidance(finding);
+
+  // Evidence list
+  const rawEvidence = Array.isArray(finding.evidence) ? finding.evidence : [];
+  const primaryEv = rawEvidence.length > 0 ? rawEvidence[0] : null;
   const rawPath = finding.fileLocation || finding.file_path || finding.file || primaryEv?.document_id || '—';
   const lineStart = finding.line_number ?? finding.line ?? primaryEv?.line_start ?? null;
   const lineEnd = primaryEv?.line_end ?? null;
@@ -122,9 +128,6 @@ export default function FindingPreviewModal({
     }));
   }
 
-  // Remediation
-  const remediation = finding.remediation || finding.recommendation || null;
-
   const isAlreadyInHistory = location.pathname.startsWith('/history');
   const isAlreadyInReviews = location.pathname.startsWith('/reviews');
 
@@ -135,6 +138,7 @@ export default function FindingPreviewModal({
       role="dialog"
       aria-modal="true"
       aria-labelledby="cs-modal-title"
+      aria-describedby="cs-modal-finding-title"
     >
       <div
         ref={dialogRef}
@@ -193,6 +197,39 @@ export default function FindingPreviewModal({
                 {category}
               </span>
             )}
+            {taxonomy.cweId && (
+              <span
+                style={{
+                  fontSize: '11px',
+                  fontFamily: 'var(--font-mono)',
+                  fontWeight: 600,
+                  color: '#4338CA',
+                  backgroundColor: '#EEF2FF',
+                  padding: '2px 8px',
+                  borderRadius: '4px',
+                  border: '1px solid #C7D2FE',
+                }}
+                title={taxonomy.cweName || taxonomy.cweId}
+              >
+                {taxonomy.cweId}
+              </span>
+            )}
+            {taxonomy.owasp && (
+              <span
+                style={{
+                  fontSize: '10px',
+                  fontFamily: 'var(--font-mono)',
+                  color: '#64748B',
+                  backgroundColor: '#F8FAFC',
+                  padding: '2px 8px',
+                  borderRadius: '4px',
+                  border: '1px solid #E2E8F0',
+                }}
+                title={taxonomy.owasp}
+              >
+                {taxonomy.owasp.split('-')[0]}
+              </span>
+            )}
           </div>
           <button
             ref={closeBtnRef}
@@ -209,7 +246,12 @@ export default function FindingPreviewModal({
         <div className="cs-modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           {/* Finding Title & ID */}
           <div>
-            <div className="cs-modal-finding-name">{title}</div>
+            <div id="cs-modal-finding-title" className="cs-modal-finding-name">{title}</div>
+            {taxonomy.cweName && (
+              <div style={{ fontSize: '12px', color: '#4F46E5', fontWeight: 500, marginTop: '2px' }}>
+                {taxonomy.cweName}
+              </div>
+            )}
             {findingId && (
               <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: '#64748B', marginTop: '2px' }}>
                 Finding ID: <code style={{ color: '#475569' }}>{findingId}</code>
@@ -244,8 +286,8 @@ export default function FindingPreviewModal({
             )}
           </div>
 
-          {/* AST / Evidence Metadata */}
-          {(astSignal || sinkName || scope) && (
+          {/* Structured AST Evidence */}
+          {(rawEvidence.length > 0 || astSignal || sinkName || scope) && (
             <div
               style={{
                 fontSize: '12px',
@@ -257,15 +299,58 @@ export default function FindingPreviewModal({
                 border: '1px solid #CBD5E1',
                 display: 'flex',
                 flexDirection: 'column',
-                gap: '4px',
+                gap: '6px',
               }}
             >
               <div style={{ fontSize: '11px', fontWeight: 700, color: '#334155', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                Authoritative AST Evidence
+                Authoritative AST Evidence ({rawEvidence.length > 0 ? rawEvidence.length : 1} item{rawEvidence.length > 1 ? 's' : ''})
               </div>
-              {astSignal && <div><strong>Rule / Signal:</strong> {astSignal}</div>}
-              {sinkName && <div><strong>Sink Target:</strong> {sinkName}</div>}
-              {scope && <div><strong>Scope:</strong> {scope}</div>}
+
+              {rawEvidence.length > 0 ? (
+                rawEvidence.map((ev, evIdx) => {
+                  if (typeof ev === 'object' && ev !== null) {
+                    const docId = ev.document_id || null;
+                    const lines = ev.line_start
+                      ? `Lines ${ev.line_start}${ev.line_end && ev.line_end !== ev.line_start ? `-${ev.line_end}` : ''}`
+                      : null;
+                    const triggerSink = ev.signal_name || null;
+                    const sType = ev.signal_type || null;
+
+                    return (
+                      <div
+                        key={evIdx}
+                        style={{
+                          display: 'flex',
+                          flexWrap: 'wrap',
+                          gap: '8px',
+                          alignItems: 'center',
+                          padding: '6px 8px',
+                          backgroundColor: '#FFFFFF',
+                          borderRadius: '4px',
+                          border: '1px solid #E2E8F0',
+                          fontSize: '11.5px',
+                        }}
+                      >
+                        {docId && <span style={{ color: '#0284C7', fontWeight: 600 }}>{docId}</span>}
+                        {lines && <span style={{ color: '#64748B' }}>{lines}</span>}
+                        {triggerSink && (
+                          <span>
+                            Trigger: <code style={{ color: '#DC2626', backgroundColor: '#FEF2F2', padding: '1px 4px', borderRadius: '2px' }}>{triggerSink}</code>
+                          </span>
+                        )}
+                        {sType && <span style={{ color: '#94A3B8', fontSize: '10.5px' }}>({sType})</span>}
+                      </div>
+                    );
+                  }
+                  return <div key={evIdx}>{String(ev)}</div>;
+                })
+              ) : (
+                <>
+                  {astSignal && <div><strong>Rule / Signal:</strong> {astSignal}</div>}
+                  {sinkName && <div><strong>Sink Target:</strong> {sinkName}</div>}
+                  {scope && <div><strong>Scope:</strong> {scope}</div>}
+                </>
+              )}
             </div>
           )}
 
@@ -310,8 +395,8 @@ export default function FindingPreviewModal({
           {/* Remediation Guidance */}
           <div
             style={{
-              backgroundColor: remediation ? 'rgba(56, 189, 248, 0.08)' : '#F8FAFC',
-              border: `1px solid ${remediation ? 'rgba(56, 189, 248, 0.25)' : '#E2E8F0'}`,
+              backgroundColor: remediationInfo ? 'rgba(56, 189, 248, 0.08)' : '#F8FAFC',
+              border: `1px solid ${remediationInfo ? 'rgba(56, 189, 248, 0.25)' : '#E2E8F0'}`,
               borderRadius: '6px',
               padding: '12px 14px',
             }}
@@ -320,17 +405,30 @@ export default function FindingPreviewModal({
               style={{
                 fontSize: '11px',
                 fontWeight: 700,
-                color: remediation ? '#0284C7' : '#64748B',
+                color: remediationInfo ? '#0284C7' : '#64748B',
                 marginBottom: '4px',
                 textTransform: 'uppercase',
                 letterSpacing: '0.5px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
               }}
             >
-              Remediation Guidance
+              <span>Remediation Guidance</span>
+              {remediationInfo && !remediationInfo.isSpecific && (
+                <span style={{ fontSize: '9.5px', color: '#64748B', textTransform: 'none', fontWeight: 500 }}>
+                  (General Best Practice)
+                </span>
+              )}
             </div>
-            <div style={{ fontSize: '13px', color: remediation ? '#334155' : '#94A3B8', lineHeight: 1.5 }}>
-              {remediation || 'No specific remediation guidance was recorded for this rule.'}
+            <div style={{ fontSize: '13px', color: remediationInfo ? '#334155' : '#94A3B8', lineHeight: 1.5 }}>
+              {remediationInfo?.text || 'No specific remediation guidance was recorded for this rule.'}
             </div>
+            {remediationInfo?.disclaimer && (
+              <div style={{ fontSize: '11px', color: '#64748B', marginTop: '6px', fontStyle: 'italic' }}>
+                ℹ️ {remediationInfo.disclaimer}
+              </div>
+            )}
           </div>
         </div>
 

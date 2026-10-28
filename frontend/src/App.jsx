@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { BrowserRouter } from 'react-router-dom';
 import AppRoutes from './routes';
 import { AuthProvider } from './context/AuthContext';
@@ -8,6 +8,15 @@ import './styles/index.css';
 import './styles/dashboard.css';
 
 export default function App() {
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('cs_pref_theme') || 'light';
+      document.documentElement.setAttribute('data-theme', saved);
+    } catch {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+  }, []);
+
   return (
     <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <AuthProvider>

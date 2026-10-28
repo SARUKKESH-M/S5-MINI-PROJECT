@@ -131,9 +131,12 @@ export default function SettingsView() {
       localStorage.setItem('cs_pref_theme', uiTheme);
       localStorage.setItem('cs_pref_density', uiDensity);
       localStorage.setItem('cs_pref_linenums', String(uiLineNums));
+      document.documentElement.setAttribute('data-theme', uiTheme);
+      window.dispatchEvent(new CustomEvent('cs-theme-changed', { detail: uiTheme }));
       setPrefSaveNotice('UI presentation preferences saved locally in this browser.');
       setTimeout(() => setPrefSaveNotice(null), 3000);
     } catch {
+      document.documentElement.setAttribute('data-theme', uiTheme);
       setPrefSaveNotice('Local storage unavailable. Preferences remain active for this session only.');
     }
   };

@@ -7,6 +7,7 @@ import ProtectedRoute from './ProtectedRoute';
 import Sidebar from '../components/dashboard/Sidebar';
 import TopHeader from '../components/dashboard/TopHeader';
 import Breadcrumbs from '../components/common/Breadcrumbs';
+import Footer from '../components/dashboard/Footer';
 
 // Route-level code splitting: landing dashboard remains eager, workspaces are loaded on demand
 const AnalyzeView = lazy(() => import('../views/AnalyzeView'));
@@ -46,15 +47,20 @@ function RouteLoading() {
   );
 }
 
-function PageLayout({ children }) {
+function PageLayout({ children, isDashboard = false }) {
   return (
     <div className="cs-main-content-workspace">
       <TopHeader />
-      <main id="main-content" tabIndex={-1} className="cs-page-workspace">
-        <Breadcrumbs />
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className={isDashboard ? "cs-dashboard-workspace" : "cs-page-workspace"}
+      >
+        {!isDashboard && <Breadcrumbs />}
         <Suspense fallback={<RouteLoading />}>
           {children}
         </Suspense>
+        <Footer />
       </main>
     </div>
   );
@@ -77,8 +83,22 @@ export default function AppRoutes() {
 
       {/* Protected Application Workspace Routes */}
       <Route element={<ProtectedRoute><WorkspaceLayout /></ProtectedRoute>}>
-        <Route path="/" element={<DashboardView />} />
-        <Route path="/dashboard" element={<DashboardView />} />
+        <Route
+          path="/"
+          element={
+            <PageLayout isDashboard>
+              <DashboardView />
+            </PageLayout>
+          }
+        />
+        <Route
+          path="/dashboard"
+          element={
+            <PageLayout isDashboard>
+              <DashboardView />
+            </PageLayout>
+          }
+        />
       <Route
         path="/analyze"
         element={

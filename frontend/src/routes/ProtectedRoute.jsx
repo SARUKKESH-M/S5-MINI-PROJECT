@@ -1,5 +1,5 @@
 import React from 'react';
-import { Navigate, useLocation, Outlet } from 'react-router-dom';
+import { Navigate, useLocation, Outlet, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import '../styles/auth.css';
 
@@ -42,9 +42,9 @@ export default function ProtectedRoute({ children, requiredRole = null }) {
         <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '24px' }}>
           This area requires <strong>{requiredRole}</strong> privileges. Your current role is <strong>{user?.role || 'USER'}</strong>.
         </p>
-        <a href="#/dashboard" className="btn btn-primary">
+        <Link to="/dashboard" className="btn btn-primary">
           Return to Dashboard
-        </a>
+        </Link>
       </div>
     );
   }

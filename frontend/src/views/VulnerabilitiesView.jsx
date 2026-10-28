@@ -13,6 +13,7 @@ import EmptyState from '../components/common/EmptyState';
 import ErrorState from '../components/common/ErrorState';
 import StatusBadge from '../components/StatusBadge';
 import FindingPreviewModal from '../components/dashboard/FindingPreviewModal';
+import { getFindingTaxonomy } from '../utils/securityTaxonomy';
 import {
   VulnerabilitiesIcon,
   CodeFileIcon,
@@ -266,7 +267,7 @@ export default function VulnerabilitiesView() {
       list = list.filter((f) => Boolean(f.is_false_positive));
     }
 
-    // 5. Search Query (Client-side fast search across title, id, category, desc, file, repo)
+    // 5. Search Query (Client-side fast search across title, id, category, desc, file, repo, and mapped CWE)
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase().trim();
       list = list.filter((f) => {
@@ -276,13 +277,16 @@ export default function VulnerabilitiesView() {
         const desc = (f.description || '').toLowerCase();
         const file = (f.fileLocation || f.file_path || '').toLowerCase();
         const repo = (f.repository || '').toLowerCase();
+        const taxonomy = getFindingTaxonomy(f);
+        const cwe = String(taxonomy?.cweId || '').toLowerCase();
         return (
           title.includes(q) ||
           fId.includes(q) ||
           cat.includes(q) ||
           desc.includes(q) ||
           file.includes(q) ||
-          repo.includes(q)
+          repo.includes(q) ||
+          cwe.includes(q)
         );
       });
     }
