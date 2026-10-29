@@ -307,4 +307,4 @@ class GitHubClient:
 
     def __repr__(self) -> str:
         token_state = "SET" if self._token else "UNSET"
-        return f"<GitHubClient base_url={self.base_url!r} token={token_state}>"
+        return f"GitHubClient(base_url={self.base_url!r}, token={token_state})"

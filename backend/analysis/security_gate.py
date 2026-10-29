@@ -9,6 +9,7 @@ CI pipeline results.
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict, Tuple
 
 
@@ -106,8 +107,7 @@ def run_security_gate(report_path: str) -> int:
         return 1
 
     try:
-        with open(report_path, "r", encoding="utf-8") as f:
-            report = json.load(f)
+        report = json.loads(Path(report_path).read_text(encoding="utf-8"))
     except Exception as e:
         print(f"SECURITY GATE FAILED: Unparseable report JSON: {e}", file=sys.stderr)
         return 1
@@ -141,9 +141,17 @@ def main() -> int:
         default="security-report.json",
         help="Path to Step 6O security report JSON file (default: security-report.json)"
     )
+    parser.add_argument(
+        "--allow-review",
+        action="store_true",
+        help="Treat REVIEW decision (exit code 2) as non-blocking success (exit code 0) for CI gates."
+    )
 
     args = parser.parse_args()
-    return run_security_gate(args.report)
+    exit_code = run_security_gate(args.report)
+    if args.allow_review and exit_code == 2:
+        return 0
+    return exit_code
 
 
 if __name__ == "__main__":

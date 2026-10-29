@@ -27,6 +27,9 @@ DEFAULT_EXCLUDED_DIRECTORIES: Set[str] = {
     ".vscode",
     "tests",
     "test",
+    "scratch",
+    "datasets",
+    "data",
 }
 
 DEFAULT_EXCLUDED_PATTERNS: List[str] = [

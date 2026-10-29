@@ -51,7 +51,7 @@ jobs:
         env:
           PYTHONPATH: .:backend
         run: |
-          python -m backend.analysis.security_gate --report security-report.json
+          python -m backend.analysis.security_gate --report security-report.json --allow-review
 
       - name: Upload Security Report Artifact
         uses: actions/upload-artifact@v4

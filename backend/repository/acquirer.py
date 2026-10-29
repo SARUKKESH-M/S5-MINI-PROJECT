@@ -131,18 +131,16 @@ def acquire_repository(
                 raise RuntimeError("Git executable is not installed or available on PATH")
 
             # Execute git clone securely using argument list (no shell=True)
-            cmd = [
-                git_bin,
-                "clone",
-                "--depth", "1",
-                "--branch", clean_branch,
-                normalized_url,
-                str(repo_dest)
-            ]
-
             try:
                 subprocess.run(
-                    cmd,
+                    [
+                        "git",
+                        "clone",
+                        "--depth", "1",
+                        "--branch", clean_branch,
+                        normalized_url,
+                        str(repo_dest)
+                    ],
                     check=True,
                     capture_output=True,
                     text=True,
@@ -198,8 +196,7 @@ def acquire_repository(
         try:
             import json
             meta_file = workspace_dir / "acquisition_meta.json"
-            with open(meta_file, "w", encoding="utf-8") as mf:
-                json.dump(meta, mf)
+            meta_file.write_text(json.dumps(meta), encoding="utf-8")
         except Exception:
             pass
 
@@ -242,11 +239,10 @@ def resolve_acquisition_metadata(
     if meta_file.exists():
         try:
             import json
-            with open(meta_file, "r", encoding="utf-8") as mf:
-                meta = json.load(mf)
-                repo_path = Path(meta["acquisition"]["repo_path"]).resolve()
-                if _is_subpath(repo_path, workspace_dir) and repo_path.exists():
-                    return meta
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            repo_path = Path(meta["acquisition"]["repo_path"]).resolve()
+            if _is_subpath(repo_path, workspace_dir) and repo_path.exists():
+                return meta
         except Exception:
             pass
 

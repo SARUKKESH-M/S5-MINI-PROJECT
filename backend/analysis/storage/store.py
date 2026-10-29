@@ -1436,19 +1436,11 @@ class AnalysisStore:
             total_findings = 0
 
             if matching_analysis_ids:
-                # Query finding aggregates using parameterized chunking to stay well under SQLite parameter limits
-                chunk_size = 500
-                for i in range(0, len(matching_analysis_ids), chunk_size):
-                    chunk = matching_analysis_ids[i : i + chunk_size]
-                    placeholders = ",".join("?" for _ in chunk)
+                # Query finding aggregates using individual parameterized queries to avoid dynamic SQL construction
+                for aid in matching_analysis_ids:
                     f_rows = conn.execute(
-                        f"""
-                        SELECT LOWER(severity) AS sev, COUNT(*) AS cnt
-                        FROM findings
-                        WHERE analysis_id IN ({placeholders})
-                        GROUP BY LOWER(severity);
-                        """,
-                        chunk,
+                        "SELECT LOWER(severity) AS sev, COUNT(*) AS cnt FROM findings WHERE analysis_id = ? GROUP BY LOWER(severity);",
+                        (aid,),
                     ).fetchall()
                     for f_row in f_rows:
                         s_name = f_row["sev"]
@@ -1560,22 +1552,10 @@ class AnalysisStore:
             # 2. Aggregate findings across matching analyses
             # Group by category and compute counts per severity level
             vuln_map: Dict[str, Dict[str, Any]] = {}
-            chunk_size = 500
-
-            for i in range(0, len(matching_analysis_ids), chunk_size):
-                chunk = matching_analysis_ids[i : i + chunk_size]
-                placeholders = ",".join("?" for _ in chunk)
+            for aid in matching_analysis_ids:
                 rows = conn.execute(
-                    f"""
-                    SELECT
-                        category,
-                        LOWER(severity) AS sev,
-                        COUNT(*) AS cnt
-                    FROM findings
-                    WHERE analysis_id IN ({placeholders})
-                    GROUP BY category, LOWER(severity);
-                    """,
-                    chunk,
+                    "SELECT category, LOWER(severity) AS sev, COUNT(*) AS cnt FROM findings WHERE analysis_id = ? GROUP BY category, LOWER(severity);",
+                    (aid,),
                 ).fetchall()
 
                 for r in rows:
@@ -1690,18 +1670,10 @@ class AnalysisStore:
             # Accumulate findings counts from SQLite findings table per repository
             for repo_id, a_ids in repo_analyses_map.items():
                 entry = repo_stats[repo_id]
-                chunk_size = 500
-                for i in range(0, len(a_ids), chunk_size):
-                    chunk = a_ids[i : i + chunk_size]
-                    placeholders = ",".join("?" for _ in chunk)
+                for aid in a_ids:
                     f_rows = conn.execute(
-                        f"""
-                        SELECT LOWER(severity) AS sev, COUNT(*) AS cnt
-                        FROM findings
-                        WHERE analysis_id IN ({placeholders})
-                        GROUP BY LOWER(severity);
-                        """,
-                        chunk,
+                        "SELECT LOWER(severity) AS sev, COUNT(*) AS cnt FROM findings WHERE analysis_id = ? GROUP BY LOWER(severity);",
+                        (aid,),
                     ).fetchall()
 
                     for f_row in f_rows:

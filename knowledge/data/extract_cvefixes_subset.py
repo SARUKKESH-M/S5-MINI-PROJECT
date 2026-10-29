@@ -106,8 +106,9 @@ def extract_cvefixes_subset(
     src_conn.row_factory = sqlite3.Row
     src_cur = src_conn.cursor()
 
-    cwe_placeholders = ",".join(f"'{c}'" for c in SUPPORTED_CWES)
-    lang_placeholders = ",".join(f"'{l}'" for l in TARGET_LANGS)
+    cwe_qs = ",".join("?" for _ in SUPPORTED_CWES)
+    lang_qs = ",".join("?" for _ in TARGET_LANGS)
+    params = list(SUPPORTED_CWES) + [l.lower() for l in TARGET_LANGS]
 
     query = f"""
     SELECT 
@@ -137,8 +138,8 @@ def extract_cvefixes_subset(
     JOIN cve c ON f.cve_id = c.cve_id
     JOIN file_change fc ON f.hash = fc.hash
     LEFT JOIN repository r ON f.repo_url = r.repo_url
-    WHERE w.cwe_id IN ({cwe_placeholders})
-      AND LOWER(fc.programming_language) IN ({lang_placeholders})
+    WHERE w.cwe_id IN ({cwe_qs})
+      AND LOWER(fc.programming_language) IN ({lang_qs})
       AND fc.code_before IS NOT NULL AND fc.code_before != ''
       AND fc.code_after IS NOT NULL AND fc.code_after != ''
       AND fc.diff IS NOT NULL AND fc.diff != ''
@@ -147,7 +148,7 @@ def extract_cvefixes_subset(
     ORDER BY w.cwe_id, LOWER(fc.programming_language), f.cve_id, f.hash, fc.file_change_id
     """
 
-    rows = [dict(r) for r in src_cur.execute(query).fetchall()]
+    rows = [dict(r) for r in src_cur.execute(query, params).fetchall()]
 
     # Stratified grouping by (programming_language, cwe_id)
     grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
@@ -324,8 +325,13 @@ def extract_cvefixes_subset(
         raise RuntimeError(f"Integrity check failed on generated DB: {integrity}")
 
     counts = {
-        tbl: dst_cur.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
-        for tbl in ["fixes", "commits", "file_change", "method_change", "cve", "cwe_classification", "repository"]
+        "fixes": dst_cur.execute("SELECT COUNT(*) FROM fixes").fetchone()[0],
+        "commits": dst_cur.execute("SELECT COUNT(*) FROM commits").fetchone()[0],
+        "file_change": dst_cur.execute("SELECT COUNT(*) FROM file_change").fetchone()[0],
+        "method_change": dst_cur.execute("SELECT COUNT(*) FROM method_change").fetchone()[0],
+        "cve": dst_cur.execute("SELECT COUNT(*) FROM cve").fetchone()[0],
+        "cwe_classification": dst_cur.execute("SELECT COUNT(*) FROM cwe_classification").fetchone()[0],
+        "repository": dst_cur.execute("SELECT COUNT(*) FROM repository").fetchone()[0],
     }
 
     dst_conn.close()

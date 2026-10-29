@@ -68,8 +68,13 @@ yarn-error.log*
 chroma_db/
 chroma_data/
 vector_db/
-data/
-storage/
+/data/
+/storage/
+backend/data/
+
+# Allow CodeSentinel backend analysis storage package
+!backend/analysis/storage/
+!backend/analysis/storage/*.py
 
 # Allow CodeSentinel curated knowledge scripts and provenance documentation
 !knowledge/data/
