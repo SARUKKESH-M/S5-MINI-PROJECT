@@ -64,3 +64,19 @@ def configure_auth_for_test(request, monkeypatch):
         monkeypatch.setattr(settings, "AUTH_ENFORCED", True)
 
 
+@pytest.fixture(autouse=True)
+def reset_ollama_cooldown_fixture():
+    """Ensure each test starts and ends with a clean Ollama failure cooldown state."""
+    try:
+        from llm.ollama_provider import OllamaLLMProvider
+        OllamaLLMProvider.reset_cooldown()
+    except Exception:
+        pass
+    yield
+    try:
+        from llm.ollama_provider import OllamaLLMProvider
+        OllamaLLMProvider.reset_cooldown()
+    except Exception:
+        pass
+
+

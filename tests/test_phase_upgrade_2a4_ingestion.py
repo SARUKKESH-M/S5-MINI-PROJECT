@@ -40,6 +40,18 @@ from rag.context_builder import build_security_analysis_context
 from backend.analysis.finding_enrichment import enrich_findings, _find_exact_curated_knowledge
 
 
+@pytest.fixture(autouse=True)
+def skip_if_datasets_missing(request):
+    """Skip tests requiring external dataset archives if datasets/ directory is absent."""
+    if request.node.name == "test_1_disabled_by_default_leaves_normal_ingestion_unchanged":
+        return
+    if request.node.name in ("test_6_missing_dataset_fails_safely", "test_6b_invalid_source_name_rejected", "test_7_cvefixes_blocked_from_production"):
+        return
+    cwe_zip = os.path.join(ROOT_DIR, "datasets", "mitre_cwe", "cwec_latest.xml.zip")
+    if not os.path.isfile(cwe_zip):
+        pytest.skip("External datasets archive not present in clean CI checkout")
+
+
 # ---------------------------------------------------------------------------
 # TEST 1: Disabled-by-Default Configuration
 # ---------------------------------------------------------------------------

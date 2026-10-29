@@ -162,11 +162,20 @@ def test_upgrade_2e_balanced_rag_context_selection():
         ingest_documents(documents=ast_docs, collection_name=transient_ast_name)
 
         # Ingest 15 Security Knowledge documents into knowledge collection
+        kn_ids = [f"kn_doc_{i:02d}" for i in range(15)]
         kn_docs = [
             {
                 "document_id": f"kn_doc_{i:02d}",
                 "content": f"Security guidance and remediation pattern {i} for SQL injection and CWE-89.",
-                "metadata": {"source_category": "security_knowledge", "topic": "sql_injection", "cwe_id": "CWE-89"},
+                "metadata": {
+                    "source_category": "security_knowledge",
+                    "document_type": "security_knowledge",
+                    "source": "owasp_curated",
+                    "source_type": "knowledge_base",
+                    "schema_version": "1.0",
+                    "topic": "sql_injection",
+                    "cwe_id": "CWE-89",
+                },
             }
             for i in range(15)
         ]
@@ -200,6 +209,11 @@ def test_upgrade_2e_balanced_rag_context_selection():
 
     finally:
         delete_transient_collection(transient_ast_name)
+        try:
+            coll = get_security_knowledge_collection()
+            coll.delete(ids=kn_ids)
+        except Exception:
+            pass
 
 
 # ==============================================================================
