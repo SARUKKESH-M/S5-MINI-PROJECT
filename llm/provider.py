@@ -193,9 +193,12 @@ def get_llm_provider(
     if provider is not None:
         return provider
 
-    # Enforce safe offline behavior during automated test runs unless live testing is explicitly requested
-    if not force_fallback and os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("CODESENTINEL_TEST_LIVE_PROVIDERS"):
-        return MockLLMProvider()
+    # Enforce safe offline behavior during automated test runs or explicit offline mode
+    if not force_fallback:
+        if os.environ.get("CODESENTINEL_FORCE_MOCK_LLM") == "1":
+            return MockLLMProvider()
+        if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("CODESENTINEL_TEST_LIVE_PROVIDERS"):
+            return MockLLMProvider()
 
     if settings is None:
         try:

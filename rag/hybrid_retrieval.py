@@ -15,7 +15,7 @@ from rag.vector_store import (
     SECURITY_KNOWLEDGE_COLLECTION_NAME,
     get_security_knowledge_collection,
 )
-from rag.retrieval import retrieve_documents
+from rag.retrieval import retrieve_documents, get_query_embedding
 
 
 def retrieve_hybrid_context(
@@ -56,12 +56,22 @@ def retrieve_hybrid_context(
 
         target_ast_coll = ast_collection_name or DEFAULT_COLLECTION_NAME
 
+        # Resolve query embedding once for both AST and security knowledge queries
+        query_emb = get_query_embedding(query)
+        if query_emb is None:
+            try:
+                coll_for_emb = get_security_knowledge_collection(db_path=db_path)
+                query_emb = get_query_embedding(query, collection=coll_for_emb)
+            except Exception:
+                query_emb = None
+
         # 2. AST Evidence Retrieval (target_ast_coll)
         if top_k_ast > 0:
             ast_retrieval = retrieve_documents(
                 query=query,
                 top_k=top_k_ast,
                 collection_name=target_ast_coll,
+                query_embeddings=query_emb,
             )
             if ast_retrieval.get("status") == "success":
                 ast_results = ast_retrieval.get("results", [])
@@ -73,10 +83,21 @@ def retrieve_hybrid_context(
 
             if total_count > 0:
                 n_results = min(top_k_knowledge, total_count)
-                query_response = coll.query(
-                    query_texts=[query],
-                    n_results=n_results,
-                )
+                query_response = None
+                if query_emb is not None:
+                    try:
+                        query_response = coll.query(
+                            query_embeddings=query_emb,
+                            n_results=n_results,
+                        )
+                    except Exception:
+                        query_response = None
+
+                if query_response is None:
+                    query_response = coll.query(
+                        query_texts=[query],
+                        n_results=n_results,
+                    )
 
                 ids_list = query_response.get("ids", [[]])[0]
                 docs_list = query_response.get("documents", [[]])[0]

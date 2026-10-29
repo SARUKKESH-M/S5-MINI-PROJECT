@@ -7,8 +7,12 @@ from rag.vector_store import (
     get_security_knowledge_collection,
     SECURITY_KNOWLEDGE_COLLECTION_NAME,
 )
-from rag.ingestion import ingest_documents, ingest_security_knowledge
-from rag.retrieval import retrieve_documents
+from rag.ingestion import (
+    ingest_documents,
+    ingest_security_knowledge,
+    reset_document_embedding_cache,
+)
+from rag.retrieval import retrieve_documents, reset_query_embedding_cache
 from rag.hybrid_retrieval import retrieve_hybrid_context
 from rag.context_ranker import rank_and_deduplicate_context
 from rag.context_builder import build_security_analysis_context
@@ -21,7 +25,9 @@ __all__ = [
     "SECURITY_KNOWLEDGE_COLLECTION_NAME",
     "ingest_documents",
     "ingest_security_knowledge",
+    "reset_document_embedding_cache",
     "retrieve_documents",
+    "reset_query_embedding_cache",
     "retrieve_hybrid_context",
     "rank_and_deduplicate_context",
     "build_security_analysis_context",

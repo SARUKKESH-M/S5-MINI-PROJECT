@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000,https://codesentinel-s5.vercel.app"
     ENABLE_SECURITY_HEADERS: bool = True
 
+    # External Security Knowledge Ingestion (Upgrade 2A opt-in)
+    ENABLE_EXTERNAL_KNOWLEDGE: bool = False
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

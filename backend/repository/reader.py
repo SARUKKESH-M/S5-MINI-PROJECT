@@ -8,11 +8,12 @@ never imported, evaluated, or executed.
 
 import os
 import stat
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from repository.discovery import get_language_for_extension
 
 
 MAX_FILE_SIZE: int = 1_000_000  # 1 MB
+_TEXT_BYTES: bytes = bytes(range(32, 127)) + b"\t\n\r"
 
 
 def is_binary_content(chunk: bytes) -> bool:
@@ -24,28 +25,31 @@ def is_binary_content(chunk: bytes) -> bool:
         return False
     if b"\x00" in chunk:
         return True
-    # Count non-ASCII control characters (excluding tab, LF, CR)
-    text_characters = bytes(range(32, 127)) + b"\t\n\r"
-    non_text = sum(1 for byte in chunk if byte not in text_characters)
-    return (non_text / len(chunk)) > 0.30
+    return (len(chunk.translate(None, _TEXT_BYTES)) / len(chunk)) > 0.30
 
 
-def read_source_file(file_rel_path: str, repository_root: str) -> Dict[str, Any]:
+def read_source_file(
+    file_rel_path: str,
+    repository_root: str,
+    abs_root_cached: Optional[str] = None,
+    known_abs_path: Optional[str] = None,
+    known_lang: Optional[str] = None,
+    is_regular: bool = False,
+) -> Dict[str, Any]:
     """
     Safely reads a repository source file as static text.
 
     Raises ValueError if path escapes repository root boundary or file is inaccessible.
     Returns metadata dictionary with source_code or skipped status.
     """
-    abs_root = os.path.abspath(repository_root)
-    full_path = os.path.abspath(os.path.join(abs_root, file_rel_path))
+    abs_root = abs_root_cached or os.path.abspath(repository_root)
+    full_path = known_abs_path or os.path.abspath(os.path.join(abs_root, file_rel_path))
 
     # Path traversal protection
     if not full_path.startswith(abs_root):
         raise ValueError(f"File path escapes repository boundary: {file_rel_path}")
 
-    ext = os.path.splitext(full_path)[1].lower()
-    language = get_language_for_extension(ext) or "unknown"
+    language = known_lang or get_language_for_extension(os.path.splitext(full_path)[1].lower()) or "unknown"
 
     # Open descriptor directly to avoid redundant stat calls and eliminate TOCTOU races
     try:
@@ -54,11 +58,23 @@ def read_source_file(file_rel_path: str, repository_root: str) -> Dict[str, Any]
         raise ValueError(f"Source file not found: {file_rel_path}") from exc
 
     with f:
-        st = os.fstat(f.fileno())
-        if not stat.S_ISREG(st.st_mode):
-            raise ValueError(f"Source file not found: {file_rel_path}")
+        if not is_regular:
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                raise ValueError(f"Source file not found: {file_rel_path}")
+            size_bytes = st.st_size
+            if size_bytes > MAX_FILE_SIZE:
+                return {
+                    "path": file_rel_path.replace("\\", "/"),
+                    "language": language,
+                    "size_bytes": size_bytes,
+                    "skipped": True,
+                    "reason": "exceeds MAX_FILE_SIZE",
+                    "source_code": ""
+                }
 
-        size_bytes = st.st_size
+        raw_bytes = f.read(MAX_FILE_SIZE + 1)
+        size_bytes = len(raw_bytes)
 
         # Individual file size limit check
         if size_bytes > MAX_FILE_SIZE:
@@ -72,7 +88,7 @@ def read_source_file(file_rel_path: str, repository_root: str) -> Dict[str, Any]
             }
 
         # Binary check and text reading
-        initial_chunk = f.read(4096)
+        initial_chunk = raw_bytes[:4096]
         if is_binary_content(initial_chunk):
             return {
                 "path": file_rel_path.replace("\\", "/"),
@@ -82,19 +98,17 @@ def read_source_file(file_rel_path: str, repository_root: str) -> Dict[str, Any]
                 "reason": "binary_content",
                 "source_code": ""
             }
-        
-        remaining_chunk = f.read()
-        full_raw_bytes = initial_chunk + remaining_chunk
 
     try:
-        content = full_raw_bytes.decode("utf-8", errors="replace")
+        content = raw_bytes.decode("utf-8", errors="replace")
     except Exception:
-        content = full_raw_bytes.decode("latin-1", errors="replace")
+        content = raw_bytes.decode("latin-1", errors="replace")
 
     return {
         "path": file_rel_path.replace("\\", "/"),
         "language": language,
         "size_bytes": size_bytes,
         "skipped": False,
+        "reason": None,
         "source_code": content
     }

@@ -42,6 +42,11 @@ DEFAULT_EXCLUDED_PATTERNS: List[str] = [
     "*.map",
 ]
 
+DEFAULT_EXCLUDED_SUFFIXES: tuple = tuple(
+    p[1:].lower() for p in DEFAULT_EXCLUDED_PATTERNS
+    if p.startswith("*.") and "/" not in p and "*" not in p[2:] and "?" not in p
+)
+
 
 def normalize_and_validate_repository_path(rel_path: str, repo_root: str) -> Path:
     """
@@ -99,8 +104,12 @@ def should_exclude_path(
         return False
 
     clean_path = rel_path.strip().replace("\\", "/")
-    # Normalize relative path to resolve '.' and '..' traversal segments
-    norm_path = os.path.normpath(clean_path).replace("\\", "/").strip("/")
+    # Fast-path: avoid expensive normpath when path has no traversal markers
+    if ".." in clean_path or "/." in clean_path or "//" in clean_path:
+        norm_path = os.path.normpath(clean_path).replace("\\", "/").strip("/")
+    else:
+        norm_path = clean_path.strip("/")
+
     parts = [p.lower() for p in norm_path.split("/") if p and p != ".."]
 
     # Check directory components against default excluded directories
@@ -110,8 +119,14 @@ def should_exclude_path(
 
     file_name = parts[-1] if parts else clean_path.lower()
 
-    # Check filename against default glob patterns
+    # Fast suffix check before glob pattern fallback
+    if file_name.endswith(DEFAULT_EXCLUDED_SUFFIXES):
+        return True
+
+    # Check remaining glob patterns
     for pattern in DEFAULT_EXCLUDED_PATTERNS:
+        if pattern.startswith("*."):
+            continue
         if fnmatch.fnmatch(file_name, pattern):
             return True
 

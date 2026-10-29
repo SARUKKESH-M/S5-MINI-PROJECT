@@ -101,21 +101,23 @@ def prepare_repository_analysis_files(
     read_files: List[Dict[str, Any]] = []
     analyzed_count = 0
     skipped_count = 0
+    abs_repo = str(repo_dest)
 
     for item in target_candidates:
         rel_path = item["path"]
-        read_res = read_source_file(rel_path, str(repo_dest))
+        try:
+            read_res = read_source_file(
+                rel_path,
+                abs_repo,
+                abs_root_cached=abs_repo,
+                known_abs_path=item.get("abs_path"),
+                known_lang=item.get("language"),
+                is_regular=True,
+            )
+        except TypeError:
+            read_res = read_source_file(rel_path, abs_repo)
 
-        file_entry = {
-            "path": rel_path,
-            "language": read_res["language"],
-            "size_bytes": read_res["size_bytes"],
-            "skipped": read_res["skipped"],
-            "reason": read_res.get("reason"),
-            "source_code": read_res["source_code"]
-        }
-
-        read_files.append(file_entry)
+        read_files.append(read_res)
 
         if read_res["skipped"]:
             skipped_count += 1

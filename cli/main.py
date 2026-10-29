@@ -111,6 +111,13 @@ def build_parser() -> argparse.ArgumentParser:
     pre_commit_parser.add_argument("--repo-dir", default=".", help="Target Git repository directory (default: '.')")
     pre_commit_parser.add_argument("--json", action="store_true", help="Output raw JSON format")
 
+    # 12. ingest-knowledge
+    ingest_parser = subparsers.add_parser("ingest-knowledge", help="Ingest curated external security knowledge into RAG vector store")
+    ingest_parser.add_argument("--sources", default="mitre_cwe,cisa_kev", help="Comma-separated list of knowledge sources (allowed: mitre_cwe, cisa_kev)")
+    ingest_parser.add_argument("--force", action="store_true", help="Force re-ingestion of documents")
+    ingest_parser.add_argument("--db-path", help="Optional ChromaDB storage path override")
+    ingest_parser.add_argument("--json", action="store_true", help="Output raw JSON format")
+
     return parser
 
 
@@ -307,6 +314,50 @@ def cmd_pre_commit(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def cmd_ingest_knowledge(args: argparse.Namespace) -> int:
+    """Executes 'ingest-knowledge' command for explicit external dataset ingestion."""
+    from rag.ingestion import ingest_external_security_knowledge
+
+    raw_sources = getattr(args, "sources", "mitre_cwe,cisa_kev")
+    sources = [s.strip() for s in raw_sources.split(",") if s.strip()]
+    db_path = getattr(args, "db_path", None)
+    force = getattr(args, "force", False)
+
+    try:
+        result = ingest_external_security_knowledge(
+            sources=sources,
+            db_path=db_path,
+            force=force,
+        )
+        if getattr(args, "json", False):
+            print(format_json_output(result))
+        else:
+            print(format_terminal_header("CodeSentinel Security Knowledge Ingestion"))
+            print(f"Status:          {result.get('status', 'unknown').upper()}")
+            print(f"Collection:      {result.get('collection_name')}")
+            print(f"Total Documents: {result.get('total_documents')}")
+            print(f"Total Chunks:    {result.get('total_chunks')}")
+            print("Sources:")
+            for src, details in result.get("sources", {}).items():
+                pres_str = " (already present)" if details.get("already_present") else ""
+                print(f"  - {src:<15}: {details.get('document_count', 0)} docs, {details.get('chunk_count', 0)} chunks{pres_str}")
+        return 0
+    except ValueError as val_err:
+        err_msg = str(val_err)
+        if getattr(args, "json", False):
+            print(format_json_output({"status": "error", "error": err_msg}))
+        else:
+            print(f"Ingestion Rejected: {err_msg}")
+        return 1
+    except Exception as exc:
+        err_msg = str(exc)
+        if getattr(args, "json", False):
+            print(format_json_output({"status": "error", "error": err_msg}))
+        else:
+            print(f"Ingestion Failed: {err_msg}")
+        return 1
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Main CLI dispatcher entry point."""
     parser = build_parser()
@@ -328,6 +379,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "gate": cmd_gate,
         "report": cmd_report,
         "pre-commit": cmd_pre_commit,
+        "ingest-knowledge": cmd_ingest_knowledge,
     }
 
     handler = command_handlers.get(args.command)

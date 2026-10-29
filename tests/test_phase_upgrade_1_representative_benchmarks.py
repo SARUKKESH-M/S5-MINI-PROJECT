@@ -751,6 +751,9 @@ def print_markdown_table(metrics: List[BenchmarkMetric]):
 
 
 if __name__ == "__main__":
+    # Configure deterministic offline mock LLM mode for standalone benchmark execution
+    os.environ["CODESENTINEL_FORCE_MOCK_LLM"] = "1"
+
     print("=" * 80)
     print("CodeSentinel U1 — Representative Performance Benchmark Execution")
     print(f"Platform: {platform.system()} {platform.release()} | Architecture: {platform.machine()}")

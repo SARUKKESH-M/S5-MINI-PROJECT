@@ -87,41 +87,60 @@ def discover_source_files(
 
     active_excluded_dirs = EXCLUDED_DIRECTORIES if exclude_dirs is None else (EXCLUDED_DIRECTORIES | set(exclude_dirs))
 
-    for dirpath, dirnames, filenames in os.walk(target_dir):
-        # Filter excluded directories in-place
-        dirnames[:] = [d for d in dirnames if d not in active_excluded_dirs and not d.startswith(".git")]
+    initial_rel = os.path.relpath(target_dir, abs_root).replace("\\", "/") if subpath else ""
+    if initial_rel == ".":
+        initial_rel = ""
 
-        for filename in filenames:
-            ext = os.path.splitext(filename)[1].lower()
-            if ext in SUPPORTED_EXTENSIONS:
-                full_file_path = os.path.join(dirpath, filename)
-                try:
-                    size_bytes = os.path.getsize(full_file_path)
-                except OSError:
-                    continue
+    # Fast directory enumeration via scandir preserving boundaries and limits
+    stack = [(target_dir, initial_rel)]
+    while stack:
+        curr_dir, rel_dir = stack.pop()
+        try:
+            with os.scandir(curr_dir) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            name = entry.name
+                            if name not in active_excluded_dirs and not name.startswith(".git"):
+                                sub_rel = f"{rel_dir}/{name}" if rel_dir else name
+                                stack.append((entry.path, sub_rel))
+                        elif entry.is_file(follow_symlinks=False):
+                            name = entry.name
+                            dot_pos = name.rfind(".")
+                            if dot_pos != -1:
+                                ext = name[dot_pos:].lower()
+                                if ext in SUPPORTED_EXTENSIONS:
+                                    try:
+                                        size_bytes = entry.stat(follow_symlinks=False).st_size
+                                    except OSError:
+                                        continue
 
-                rel_path = os.path.relpath(full_file_path, abs_root).replace("\\", "/")
-                lang = SUPPORTED_EXTENSIONS[ext]
+                                    rel_path = f"{rel_dir}/{name}" if rel_dir else name
+                                    lang = SUPPORTED_EXTENSIONS[ext]
 
-                discovered_files.append({
-                    "path": rel_path,
-                    "abs_path": full_file_path,
-                    "language": lang,
-                    "extension": ext,
-                    "size_bytes": size_bytes
-                })
+                                    discovered_files.append({
+                                        "path": rel_path,
+                                        "abs_path": entry.path,
+                                        "language": lang,
+                                        "extension": ext,
+                                        "size_bytes": size_bytes
+                                    })
 
-                total_bytes += size_bytes
+                                    total_bytes += size_bytes
 
-                if len(discovered_files) > MAX_SOURCE_FILES:
-                    raise ValueError(
-                        f"Repository exceeds maximum allowed source file count ({MAX_SOURCE_FILES} files)"
-                    )
+                                    if len(discovered_files) > MAX_SOURCE_FILES:
+                                        raise ValueError(
+                                            f"Repository exceeds maximum allowed source file count ({MAX_SOURCE_FILES} files)"
+                                        )
 
-                if total_bytes > MAX_TOTAL_SOURCE_BYTES:
-                    raise ValueError(
-                        f"Repository exceeds maximum allowed total source content size ({MAX_TOTAL_SOURCE_BYTES} bytes)"
-                    )
+                                    if total_bytes > MAX_TOTAL_SOURCE_BYTES:
+                                        raise ValueError(
+                                            f"Repository exceeds maximum allowed total source content size ({MAX_TOTAL_SOURCE_BYTES} bytes)"
+                                        )
+                    except OSError:
+                        continue
+        except OSError:
+            continue
 
     # Sort deterministically by relative path
     discovered_files.sort(key=lambda x: x["path"])

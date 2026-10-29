@@ -71,6 +71,11 @@ vector_db/
 data/
 storage/
 
+# Allow CodeSentinel curated knowledge scripts and provenance documentation
+!knowledge/data/
+!knowledge/data/*.py
+!knowledge/data/*.md
+
 # ==============================================================================
 # Application Logs & Temporary Files
 # ==============================================================================
