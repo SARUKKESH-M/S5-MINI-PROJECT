@@ -8,7 +8,7 @@ Preserves all structural metadata while using upsert semantics for idempotency.
 import os
 import threading
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 from app.core.config import settings
 from rag.vector_store import (
     get_collection,
